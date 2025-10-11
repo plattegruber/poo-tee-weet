@@ -84,6 +84,34 @@ textarea {
    Author's custom styles
    ========================================================================== */
 
+:root {
+  --background-color: #F5F4F1;
+  --text-color: #353535;
+  --kinda-red-color: #D64550;
+  --kinda-green-color: #B8D8BA;
+  --kinda-blue-color: #6689A1;
+}
+
+body {
+  background-color: var(--background-color);
+}
+
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: 'Bree Serif', 'Merriweather', serif;
+  color: var(--text-color);
+}
+
+[contenteditable="true"]:focus {
+  outline: none;
+  caret-color: var(--text-color)
+}
+
 /* ==========================================================================
    Helper classes
    ========================================================================== */
