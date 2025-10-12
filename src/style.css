@@ -85,11 +85,11 @@ textarea {
    ========================================================================== */
 
 :root {
-  --background-color: #F5F4F1;
+  --background-color: #f5f4f1;
   --text-color: #353535;
-  --kinda-red-color: #D64550;
-  --kinda-green-color: #B8D8BA;
-  --kinda-blue-color: #6689A1;
+  --kinda-red-color: #d64550;
+  --kinda-green-color: #b8d8ba;
+  --kinda-blue-color: #6689a1;
 }
 
 body {
@@ -107,9 +107,9 @@ h6 {
   color: var(--text-color);
 }
 
-[contenteditable="true"]:focus {
+[contenteditable='true']:focus {
   outline: none;
-  caret-color: var(--text-color)
+  caret-color: var(--text-color);
 }
 
 /* ==========================================================================
@@ -181,7 +181,7 @@ h6 {
 
 .clearfix::before,
 .clearfix::after {
-  content: "";
+  content: '';
   display: table;
 }
 
@@ -229,20 +229,20 @@ h6 {
   }
 
   a[href]::after {
-    content: " (" attr(href) ")";
+    content: ' (' attr(href) ')';
   }
 
   abbr[title]::after {
-    content: " (" attr(title) ")";
+    content: ' (' attr(title) ')';
   }
 
   /*
    * Don't show links that are fragment identifiers,
    * or use the `javascript:` pseudo protocol
    */
-  a[href^="#"]::after,
-  a[href^="javascript:"]::after {
-    content: "";
+  a[href^='#']::after,
+  a[href^='javascript:']::after {
+    content: '';
   }
 
   pre {
