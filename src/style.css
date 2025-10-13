@@ -87,17 +87,35 @@ textarea {
 :root {
   --background-color: #f5f4f1;
   --text-color: #353535;
-  --kinda-red-color: #d64550;
-  --kinda-green-color: #b8d8ba;
-  --kinda-blue-color: #6689a1;
+  --accent-color: #d64550; /* for links, emphasis, highlights */
+  --heading-font: 'Inter', 'Helvetica Neue', sans-serif;
+  --body-font: 'Charter', 'Merriweather', serif;
+  --max-width: 65ch; /* ideal measure for comfortable reading */
 }
 
 body {
   background-color: var(--background-color);
   display: flex;
   justify-content: center;
+  padding: 4rem 1rem;
   min-height: 100vh;
 }
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--heading-font);
+  font-weight: 600;
+  line-height: 1.2;
+  margin-top: 2.5rem;
+  margin-bottom: 1rem;
+}
+
+h1 {
+  font-size: 2.25rem;
+  border-bottom: 2px solid var(--accent-color);
+  padding-bottom: 0.3em;
+}
+h2 { font-size: 1.75rem; margin-top: 2rem; }
+h3 { font-size: 1.5rem; margin-top: 1.5rem; }
 
 p,
 h1,
@@ -108,6 +126,55 @@ h5,
 h6 {
   font-family: 'Charter', 'Merriweather', serif;
   color: var(--text-color);
+}
+
+p {
+  margin: 1rem 0;
+}
+
+a {
+  color: var(--accent-color);
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+strong {
+  font-weight: 600;
+  color: var(--accent-color);
+}
+em {
+  font-style: italic;
+}
+
+ul, ol {
+  padding-left: 2rem;
+  margin: 1.25rem 0;
+}
+
+blockquote {
+  border-left: 4px solid var(--accent-color);
+  padding-left: 1rem;
+  font-style: italic;
+  color: #555;
+  margin: 1.5rem 0;
+}
+
+code {
+  font-family: 'Menlo', 'Consolas', monospace;
+  background: rgba(0,0,0,0.05);
+  padding: 0.2em 0.4em;
+  border-radius: 4px;
+}
+
+hr {
+  border: none;
+  height: 1px;
+  background: var(--accent-color);
+  margin: 3rem 0;
+  opacity: 0.3;
 }
 
 [contenteditable='true']:focus {
@@ -127,6 +194,11 @@ aside:focus-within {
 }
 
 main {
+  font-family: var(--body-font);
+  color: var(--text-color);
+  font-size: 1.125rem;
+  line-height: 1.6;
+  max-width: var(--max-width);
   flex: 1;
   min-width: 600px;
   max-width: 900px;
