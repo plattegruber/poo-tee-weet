@@ -25,7 +25,31 @@
   </head>
 
   <body>
-    <main contenteditable="true"></main>
+    <aside aria-label="Document history">
+      <nav>
+        <h2>Documents</h2>
+        <button type="button">+ New Document</button>
+        <ul>
+          <!-- <li><a href="#doc1">Untitled Document</a></li>
+        <li><a href="#doc2">Meeting Notes</a></li> -->
+        </ul>
+      </nav>
+    </aside>
+
+    <main
+      contenteditable="true"
+      role="textbox"
+      aria-multiline="true"
+      aria-label="Document editor"
+    ></main>
+
+    <aside aria-label="Customization options">
+      <h2>Customize</h2>
+      <section>
+        <h3>Background</h3>
+        <div></div>
+      </section>
+    </aside>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

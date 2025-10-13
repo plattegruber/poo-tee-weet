@@ -94,6 +94,9 @@ textarea {
 
 body {
   background-color: var(--background-color);
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
 }
 
 p,
@@ -110,6 +113,37 @@ h6 {
 [contenteditable='true']:focus {
   outline: none;
   caret-color: var(--text-color);
+}
+
+aside {
+  flex: 0 0 300px;
+  transition: opacity 0.3s ease;
+  opacity: 0;
+}
+
+aside:hover,
+aside:focus-within {
+  opacity: 1;
+}
+
+main {
+  flex: 1;
+  min-width: 600px;
+  max-width: 900px;
+}
+
+aside:first-of-type {
+  background: white;
+  border-right: 1px solid #e0e0e0;
+  padding: 2rem;
+  overflow-y: auto;
+}
+
+aside:last-of-type {
+  background: white;
+  border-left: 1px solid #e0e0e0;
+  padding: 2rem;
+  overflow-y: auto;
 }
 
 /* ==========================================================================
