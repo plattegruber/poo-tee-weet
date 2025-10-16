@@ -8,12 +8,12 @@ import './style.css';
  */
 const bootstrapEditor = (root) => {
   if (!root) return;
-  
-  let firstParagraph = document.createElement("p");
-  firstParagraph.textContent = "A distraction free writing tool.";
 
-  let secondParagraph = document.createElement("p");
-  secondParagraph.textContent = "So it goes.";
+  let firstParagraph = document.createElement('p');
+  firstParagraph.textContent = 'A distraction free writing tool.';
+
+  let secondParagraph = document.createElement('p');
+  secondParagraph.textContent = 'So it goes.';
 
   root.replaceChildren(firstParagraph, secondParagraph);
 };
