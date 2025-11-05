@@ -6,12 +6,13 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "skipLibCheck": true,
     "strict": true,
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*.js", "vite.config.js"],
+  "include": ["src/**/*.js", "src/**/*.d.ts", "vite.config.js"],
   "exclude": ["node_modules", "dist"]
 }

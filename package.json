@@ -12,8 +12,12 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/react": "^19.2.2",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3",
     "vite": "^5.3.1"
+  },
+  "dependencies": {
+    "@clerk/clerk-js": "^5.104.0"
   }
 }
