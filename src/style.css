@@ -172,6 +172,31 @@ em {
   padding: 3rem 0;
 }
 
+.auth-toggle {
+  margin-top: 1.5rem;
+  text-align: center;
+  font-family: var(--heading-font);
+  font-size: 0.95rem;
+}
+
+.auth-toggle button {
+  background: none;
+  border: none;
+  color: var(--accent-color);
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0;
+}
+
+.auth-toggle button:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
+.auth-toggle button:hover {
+  text-decoration: underline;
+}
+
 ul,
 ol {
   padding-left: 2rem;
@@ -215,6 +240,12 @@ main {
   flex: 1;
   min-width: 600px;
   max-width: 900px;
+}
+
+main[aria-label='Authentication forms'] {
+  min-width: auto;
+  max-width: min(420px, 90vw);
+  padding: 0 1.5rem;
 }
 
 /* ==========================================================================

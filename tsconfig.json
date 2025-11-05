@@ -1,18 +1,24 @@
 {
+  "extends": "@tsconfig/svelte/tsconfig.json",
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,
-    "target": "ESNext",
-    "module": "ESNext",
     "moduleResolution": "Bundler",
-    "skipLibCheck": true,
     "strict": true,
     "baseUrl": ".",
+    "types": ["node"],
     "paths": {
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*.js", "src/**/*.d.ts", "vite.config.js"],
+  "include": [
+    "src/**/*.js",
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "src/**/*.d.ts",
+    "svelte.config.js",
+    "vite.config.mjs"
+  ],
   "exclude": ["node_modules", "dist"]
 }

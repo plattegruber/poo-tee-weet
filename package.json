@@ -2,6 +2,7 @@
   "name": "poo-tee-weet",
   "version": "0.0.1",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -9,15 +10,19 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
-    "@types/react": "^19.2.2",
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@tsconfig/svelte": "^5.0.5",
+    "@types/node": "^24.10.0",
     "prettier": "^3.6.2",
+    "svelte": "^5.1.1",
+    "svelte-check": "^4.1.2",
     "typescript": "^5.9.3",
     "vite": "^5.3.1"
   },
   "dependencies": {
-    "@clerk/clerk-js": "^5.104.0"
+    "svelte-clerk": "^0.17.7"
   }
 }
