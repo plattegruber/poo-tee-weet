@@ -1,0 +1,19 @@
+name = "poo-tee-weet-worker"
+main = "worker/src/index.ts"
+compatibility_date = "2024-05-17"
+compatibility_flags = ["nodejs_compat"]
+
+[build]
+tsconfig = "worker/tsconfig.json"
+
+[[durable_objects.bindings]]
+name = "DocumentDO"
+class_name = "DocumentDO"
+
+[[durable_objects.bindings]]
+name = "UserIndexDO"
+class_name = "UserIndexDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["DocumentDO", "UserIndexDO"]
