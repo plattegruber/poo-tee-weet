@@ -30,6 +30,7 @@
   - `DocumentDO` stores canonical document content.
   - `UserIndexDO` manages per-user document indexes and orchestrates writes.
 - Run `npm run dev:worker` to start Wrangler locally (`wrangler dev --local`), then launch the Vite dev server in a second terminal.
+- Production deploys are triggered through the Cloudflare deployment automation (build + `wrangler deploy`).
 - Deploy using your usual Wrangler deployment flow (`wrangler deploy`) once environment variables are configured.
 
 ## JSDoc Types
