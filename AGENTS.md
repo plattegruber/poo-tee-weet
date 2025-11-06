@@ -20,6 +20,7 @@
 - Rely on Prettier defaults: two-space indentation, semicolons, trailing commas on multiline lists.
 - Prefer ES modules, arrow functions, and `const`-first declarations in `src/`.
 - Use camelCase for variables/functions, PascalCase for constructor-like exports, and kebab-case for new files.
+- Reach for Tailwind utility classes that follow our established best practices, and avoid inline styles or bespoke selectors unless no Tailwind solution exists.
 - Annotate new code with `// @ts-check` and JSDoc tags so `npm run typecheck` stays green.
 
 ## Testing Guidelines
