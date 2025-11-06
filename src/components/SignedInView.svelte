@@ -24,11 +24,15 @@
 
   const TOKEN_TEMPLATE = 'poo-tee-weet';
   const SAVE_DEBOUNCE_MS = 1500;
-  const DEFAULT_MARKUP = `<p>A distraction free writing tool.</p><p>So it goes.</p>`;
+  const DEFAULT_TITLE = 'Welcome to poo-tee-weet';
+  const DEFAULT_UNTITLED = 'Untitled';
+  const DEFAULT_BODY = `<p>A distraction free writing tool.</p><p>So it goes.</p>`;
+  const DEFAULT_MARKUP = `<h1>${DEFAULT_TITLE}</h1>${DEFAULT_BODY}`;
   const isBrowser = typeof window !== 'undefined';
 
   const clerk = useClerkContext();
 
+  let titleElement: HTMLElement | null = null;
   let editor: HTMLElement | null = null;
   let docId: string | null = null;
   let pendingSave: ReturnType<typeof setTimeout> | null = null;
@@ -53,16 +57,211 @@
     }
   };
 
-  const computeTitle = (html: string) => {
+  const sanitizeTitleText = (value: string) => {
+    return value.replace(/\s+/g, ' ').trim().slice(0, 120);
+  };
+
+  const resolveTitleText = (value: string | null | undefined) => {
+    const sanitized = sanitizeTitleText(value ?? '');
+    return sanitized || DEFAULT_UNTITLED;
+  };
+
+  const escapeHtml = (value: string) => {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+
+  const splitDocumentContent = (html: string) => {
     if (typeof document === 'undefined') {
-      return 'Untitled';
+      return {
+        titleText: DEFAULT_TITLE,
+        bodyHtml: html,
+      };
     }
+
     const temp = document.createElement('div');
     temp.innerHTML = html;
-    const text = temp.textContent ?? '';
-    const candidate = text.split('\n').map((line) => line.trim()).find(Boolean);
-    if (!candidate) return 'Untitled';
-    return candidate.slice(0, 120);
+    const heading = temp.querySelector('h1');
+    let titleText = DEFAULT_TITLE;
+
+    if (heading) {
+      titleText = resolveTitleText(heading.textContent ?? DEFAULT_TITLE);
+      heading.remove();
+    } else {
+      let candidateNode: ChildNode | null = temp.firstChild;
+
+      while (
+        candidateNode &&
+        candidateNode.nodeType === Node.TEXT_NODE &&
+        !(candidateNode.textContent ?? '').trim()
+      ) {
+        const toRemove = candidateNode;
+        candidateNode = candidateNode.nextSibling;
+        temp.removeChild(toRemove);
+      }
+
+      if (candidateNode && candidateNode.nodeType === Node.ELEMENT_NODE) {
+        const element = candidateNode as HTMLElement;
+        titleText = resolveTitleText(element.textContent ?? DEFAULT_UNTITLED);
+        element.remove();
+      } else if (candidateNode && candidateNode.nodeType === Node.TEXT_NODE) {
+        titleText = resolveTitleText(candidateNode.textContent ?? DEFAULT_UNTITLED);
+        candidateNode.remove();
+      } else {
+        const text = temp.textContent ?? '';
+        const fallback = text.split('\n').map((line) => line.trim()).find(Boolean);
+        if (fallback) {
+          titleText = resolveTitleText(fallback);
+        }
+      }
+    }
+
+    const bodyHtml = temp.innerHTML.trim();
+
+    return {
+      titleText,
+      bodyHtml,
+    };
+  };
+
+  const computeTitle = (html: string) => {
+    if (typeof document === 'undefined') {
+      return DEFAULT_TITLE;
+    }
+    const { titleText } = splitDocumentContent(html);
+    return titleText || DEFAULT_UNTITLED;
+  };
+
+  const applyDocumentContent = (titleText: string, bodyHtml: string) => {
+    if (titleElement) {
+      titleElement.textContent = titleText || DEFAULT_TITLE;
+    }
+
+    if (editor) {
+      editor.innerHTML = bodyHtml ?? '';
+    }
+  };
+
+  const serializeDocument = () => {
+    const titleTextRaw = titleElement?.textContent ?? '';
+    const titleText = resolveTitleText(titleTextRaw);
+    const bodyHtml = editor?.innerHTML ?? DEFAULT_BODY;
+    return `<h1>${escapeHtml(titleText)}</h1>${bodyHtml}`;
+  };
+
+  const placeCaretAtStart = (element: HTMLElement) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  const placeCaretAtEnd = (element: HTMLElement) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  const hasPriorContent = (fragment: DocumentFragment) => {
+    for (const node of Array.from(fragment.childNodes)) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if ((node.textContent ?? '').trim().length > 0) {
+          return true;
+        }
+        continue;
+      }
+
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const elementNode = node as HTMLElement;
+        if ((elementNode.textContent ?? '').trim().length > 0) {
+          return true;
+        }
+        continue;
+      }
+
+      return true;
+    }
+    return false;
+  };
+
+  const isSelectionAtContentStart = (element: HTMLElement) => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return false;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return false;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed) {
+      return false;
+    }
+
+    if (!element.contains(range.startContainer)) {
+      return false;
+    }
+
+    const preRange = range.cloneRange();
+    preRange.selectNodeContents(element);
+    try {
+      preRange.setEnd(range.startContainer, range.startOffset);
+    } catch {
+      return false;
+    }
+
+    if (!preRange.collapsed) {
+      const preceding = preRange.cloneContents();
+      if (hasPriorContent(preceding)) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  const focusEditorAtStart = () => {
+    if (!editor) return;
+    editor.focus();
+    placeCaretAtStart(editor);
+  };
+
+  const focusTitleAtEnd = () => {
+    if (!titleElement) return;
+    titleElement.focus();
+    placeCaretAtEnd(titleElement);
+  };
+
+  const handleTitleKeydown = (event: KeyboardEvent) => {
+    if (event.key !== 'ArrowDown' || event.shiftKey) {
+      return;
+    }
+    if (!editor) return;
+    event.preventDefault();
+    focusEditorAtStart();
+  };
+
+  const handleEditorKeydown = (event: KeyboardEvent) => {
+    if (event.key !== 'ArrowUp' || event.shiftKey) {
+      return;
+    }
+    if (!editor || !titleElement) return;
+    if (!isSelectionAtContentStart(editor)) {
+      return;
+    }
+    event.preventDefault();
+    focusTitleAtEnd();
   };
 
   const getSessionToken = async () => {
@@ -115,19 +314,24 @@
     saveError = null;
     isDirty = false;
 
-    if (editor) {
-      editor.innerHTML = payload.document.content || DEFAULT_MARKUP;
-    }
+    const { titleText, bodyHtml } = splitDocumentContent(
+      payload.document.content || DEFAULT_MARKUP
+    );
+
+    applyDocumentContent(titleText, bodyHtml);
 
     return true;
   };
 
   const createDocument = async (key: string) => {
-    const initialContent = editor?.innerHTML ?? DEFAULT_MARKUP;
+    const initialContent = serializeDocument();
+    const initialTitle =
+      resolveTitleText(titleElement?.textContent ?? '') || computeTitle(initialContent);
+
     const response = await apiRequest('/me/docs', {
       method: 'POST',
       body: JSON.stringify({
-        title: computeTitle(initialContent),
+        title: initialTitle,
         content: initialContent,
         tags: [],
       }),
@@ -169,8 +373,11 @@
     }
 
     await createDocument(storageKey);
+    if (titleElement && !sanitizeTitleText(titleElement.textContent ?? '')) {
+      titleElement.textContent = DEFAULT_TITLE;
+    }
     if (editor && editor.innerHTML.trim().length === 0) {
-      editor.innerHTML = DEFAULT_MARKUP;
+      editor.innerHTML = DEFAULT_BODY;
     }
   };
 
@@ -178,8 +385,8 @@
     if (!docId || !editor) return;
     if (!isDirty && !force) return;
 
-    const content = editor.innerHTML;
-    const title = computeTitle(content);
+    const content = serializeDocument();
+    const title = resolveTitleText(titleElement?.textContent ?? '') || DEFAULT_TITLE;
 
     isSaving = true;
     saveError = null;
@@ -237,6 +444,13 @@
     scheduleSave(true);
   };
 
+  const handleTitleBlur = () => {
+    if (titleElement && !sanitizeTitleText(titleElement.textContent ?? '')) {
+      titleElement.textContent = DEFAULT_UNTITLED;
+    }
+    handleBlur();
+  };
+
   const handleBeforeUnload = (event: BeforeUnloadEvent) => {
     if (!isDirty) return;
     event.preventDefault();
@@ -244,7 +458,11 @@
   };
 
   onMount(() => {
-    editor?.focus();
+    if (titleElement) {
+      titleElement.focus();
+    } else {
+      editor?.focus();
+    }
     if (isBrowser) {
       window.addEventListener('beforeunload', handleBeforeUnload);
     }
@@ -268,7 +486,24 @@
 </script>
 
 <section class="mx-auto flex min-h-screen w-full max-w-3xl flex-col px-6 pb-24 pt-16">
-  <main
+  <h1
+    class="mb-6 w-full text-4xl font-heading leading-tight focus:outline-none"
+    bind:this={titleElement}
+    contenteditable="true"
+    spellcheck="false"
+    autocapitalize="off"
+    translate="no"
+    lang="en"
+    aria-label="Document title"
+    oninput={handleInput}
+    onblur={handleTitleBlur}
+    onkeydown={handleTitleKeydown}
+    data-testid="editor-title"
+  >
+    {DEFAULT_TITLE}
+  </h1>
+
+  <div
     class="tab-size-4 w-full flex-1 text-lg leading-relaxed focus:outline-none"
     bind:this={editor}
     contenteditable="true"
@@ -277,13 +512,16 @@
     translate="no"
     lang="en"
     aria-label="Writing editor"
+    role="textbox"
+    aria-multiline="true"
+    tabindex="0"
     oninput={handleInput}
     onblur={handleBlur}
-    data-testid="editor"
+    onkeydown={handleEditorKeydown}
+    data-testid="editor-body"
   >
-    <p>A distraction free writing tool.</p>
-    <p>So it goes.</p>
-  </main>
+    {@html DEFAULT_BODY}
+  </div>
 
   <div class="mt-6 text-sm leading-heading" role="status" aria-live="polite">
     {#if saveError}
