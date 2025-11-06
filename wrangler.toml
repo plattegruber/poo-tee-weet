@@ -16,4 +16,4 @@ class_name = "UserIndexDO"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["DocumentDO", "UserIndexDO"]
+new_sqlite_classes = ["DocumentDO", "UserIndexDO"]
