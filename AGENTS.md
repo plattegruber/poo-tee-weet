@@ -3,7 +3,8 @@
 ## Project Structure & Module Organization
 - `index.html` hosts the app shell loaded by Vite; avoid editing generated markup directly.
 - `src/main.js` bootstraps the editor UI—add new modules under `src/` and import them through this entry point.
-- `src/style.css` carries global styling; keep component-specific selectors near their related markup.
+- `src/app.css` wires Tailwind layers; extend styling through Tailwind utilities or the config rather than ad-hoc CSS files.
+- Tailwind lives in `tailwind.config.js` and `postcss.config.js`; add theme extensions or plugins there when new design tokens are required.
 - Static assets live in `public/` (icons, `img/`); reference them with absolute paths so Vite handles caching.
 - Production builds emit to `dist/`; never commit the directory.
 

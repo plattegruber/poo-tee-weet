@@ -1,6 +1,6 @@
 // @ts-check
 
-import './style.css';
+import './app.css';
 import App from './App.svelte';
 import { mount } from 'svelte';
 

@@ -53,23 +53,36 @@
 </script>
 
 <main
+  class="flex min-h-screen items-center justify-center px-4 py-16"
   aria-busy="false"
   contenteditable="false"
   lang="en"
   aria-label="Authentication forms"
 >
-  <div class="auth-root">
+  <div class="flex w-full max-w-md flex-col items-center gap-6">
     {#if screen === 'signUp'}
       <SignUp {...sharedProps} />
-      <p class="auth-toggle">
+      <p class="text-center font-heading text-sm leading-heading">
         Already have an account?
-        <button type="button" onclick={showSignIn}>Sign in</button>
+        <button
+          class="ml-1 bg-transparent font-semibold text-accent underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent hover:underline"
+          type="button"
+          onclick={showSignIn}
+        >
+          Sign in
+        </button>
       </p>
     {:else}
       <SignIn {...sharedProps} />
-      <p class="auth-toggle">
+      <p class="text-center font-heading text-sm leading-heading">
         Need an account?
-        <button type="button" onclick={showSignUp}>Sign up</button>
+        <button
+          class="ml-1 bg-transparent font-semibold text-accent underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent hover:underline"
+          type="button"
+          onclick={showSignUp}
+        >
+          Sign up
+        </button>
       </p>
     {/if}
   </div>

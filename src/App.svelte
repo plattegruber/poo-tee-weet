@@ -21,26 +21,28 @@
       : '/';
 </script>
 
-<ClerkProvider publishableKey={publishableKey}>
-  <ClerkLoading>
-    <main
-      class="auth-root"
-      aria-busy="true"
-      contenteditable="false"
-      lang="en"
-      aria-label="Loading authentication state"
-    >
-      <p>Loading…</p>
-    </main>
-  </ClerkLoading>
+<div class="min-h-screen bg-editor-background font-body text-editor-text">
+  <ClerkProvider publishableKey={publishableKey}>
+    <ClerkLoading>
+      <main
+        class="flex min-h-screen items-center justify-center px-6 py-12"
+        aria-busy="true"
+        contenteditable="false"
+        lang="en"
+        aria-label="Loading authentication state"
+      >
+        <p class="text-lg font-heading leading-heading text-editor-busy">Loading…</p>
+      </main>
+    </ClerkLoading>
 
-  <ClerkLoaded>
-    <SignedIn>
-      <SignedInView />
-    </SignedIn>
+    <ClerkLoaded>
+      <SignedIn>
+        <SignedInView />
+      </SignedIn>
 
-    <SignedOut>
-      <SignedOutView afterAuthUrl={afterAuthUrl} />
-    </SignedOut>
-  </ClerkLoaded>
-</ClerkProvider>
+      <SignedOut>
+        <SignedOutView afterAuthUrl={afterAuthUrl} />
+      </SignedOut>
+    </ClerkLoaded>
+  </ClerkProvider>
+</div>

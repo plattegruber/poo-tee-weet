@@ -39,7 +39,7 @@
   let saveError = $state<string | null>(null);
   let lastSavedAt = $state<string | null>(null);
 
-  const storageKey = $derived(() => {
+  const storageKey = $derived.by(() => {
     const sessionId = clerk.session?.id ?? null;
     return sessionId ? `ptw-doc-${sessionId}` : null;
   });
@@ -267,61 +267,41 @@
   });
 </script>
 
-<main
-  bind:this={editor}
-  contenteditable="true"
-  spellcheck="false"
-  autocapitalize="off"
-  translate="no"
-  lang="en"
-  aria-label="Writing editor"
-  style="tab-size: 4"
-  on:input={handleInput}
-  on:blur={handleBlur}
-  data-testid="editor"
->
-  <p>A distraction free writing tool.</p>
-  <p>So it goes.</p>
-</main>
+<section class="mx-auto flex min-h-screen w-full max-w-3xl flex-col px-6 pb-24 pt-16">
+  <main
+    class="tab-size-4 w-full flex-1 text-lg leading-relaxed focus:outline-none"
+    bind:this={editor}
+    contenteditable="true"
+    spellcheck="false"
+    autocapitalize="off"
+    translate="no"
+    lang="en"
+    aria-label="Writing editor"
+    oninput={handleInput}
+    onblur={handleBlur}
+    data-testid="editor"
+  >
+    <p>A distraction free writing tool.</p>
+    <p>So it goes.</p>
+  </main>
 
-<div class="editor-status" role="status" aria-live="polite">
-  {#if saveError}
-    <span class="status error">We hit a snag saving: {saveError}</span>
-  {:else if isSaving}
-    <span class="status busy">Saving…</span>
-  {:else if lastSavedAt}
-    <span class="status ok">Saved at {formatTimestamp(lastSavedAt)}</span>
-  {:else}
-    <span class="status idle">All changes saved.</span>
-  {/if}
-</div>
+  <div class="mt-6 text-sm leading-heading" role="status" aria-live="polite">
+    {#if saveError}
+      <span class="inline-flex items-center gap-1 text-editor-error">
+        We hit a snag saving: {saveError}
+      </span>
+    {:else if isSaving}
+      <span class="inline-flex items-center gap-1 text-editor-busy">Saving…</span>
+    {:else if lastSavedAt}
+      <span class="inline-flex items-center gap-1 text-editor-ok">
+        Saved at {formatTimestamp(lastSavedAt)}
+      </span>
+    {:else}
+      <span class="inline-flex items-center gap-1 text-editor-busy">All changes saved.</span>
+    {/if}
+  </div>
+</section>
 
-<div class="user-button">
+<div class="fixed right-6 top-6 z-10">
   <UserButton afterSignOutUrl="#/sign-in" />
 </div>
-
-<style>
-  .editor-status {
-    margin-top: 1.5rem;
-    font-size: 0.875rem;
-    color: var(--status-color, #555);
-  }
-
-  .status {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-  }
-
-  .status.busy {
-    color: #555;
-  }
-
-  .status.ok {
-    color: #267940;
-  }
-
-  .status.error {
-    color: #b00020;
-  }
-</style>
