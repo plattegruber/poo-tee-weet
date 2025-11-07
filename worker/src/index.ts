@@ -35,6 +35,67 @@ interface DocumentMetadata {
   version: number;
 }
 
+const MAX_TAGS_PER_DOCUMENT = 20;
+const MAX_TAG_LENGTH = 48;
+
+const sanitizeTagValue = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.replace(/\s+/g, ' ').trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.slice(0, MAX_TAG_LENGTH);
+};
+
+const normalizeTagsInput = (value: unknown): string[] | null => {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const sanitized = sanitizeTagValue(item);
+    if (!sanitized) {
+      continue;
+    }
+    const key = sanitized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    normalized.push(sanitized);
+    if (normalized.length >= MAX_TAGS_PER_DOCUMENT) {
+      break;
+    }
+  }
+  return normalized;
+};
+
+const ensureDocumentTags = (value: unknown): string[] => {
+  const normalized = normalizeTagsInput(value);
+  return normalized ?? [];
+};
+
+const aggregateTags = (entries: DocumentMetadata[]): string[] => {
+  const seen = new Map<string, string>();
+  for (const entry of entries) {
+    for (const tag of entry.tags ?? []) {
+      const sanitized = sanitizeTagValue(tag);
+      if (!sanitized) {
+        continue;
+      }
+      const key = sanitized.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.set(key, sanitized);
+    }
+  }
+  return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+};
+
 type JsonValue = Record<string, unknown>;
 
 const JSON_HEADERS = {
@@ -393,10 +454,12 @@ export class UserIndexDO {
     const list = Object.values(entries).sort((a, b) => {
       return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
     });
+    const allTags = aggregateTags(list);
 
     return new Response(
       JSON.stringify({
         documents: list,
+        tags: allTags,
       }),
       {
         status: 200,
@@ -410,7 +473,7 @@ export class UserIndexDO {
     const payload = {
       title: (body.title as string | undefined) ?? '',
       content: (body.content as string | undefined) ?? '',
-      tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
+      tags: ensureDocumentTags(body.tags),
     };
 
     const docStub = this.env.DocumentDO.get(this.env.DocumentDO.idFromName(docId));
@@ -475,7 +538,7 @@ export class UserIndexDO {
     entries[document.docId] = {
       docId: document.docId,
       title: document.title,
-      tags: document.tags,
+      tags: ensureDocumentTags(document.tags),
       updatedAt: document.updatedAt,
       createdAt: document.createdAt,
       version: document.version,
@@ -672,11 +735,12 @@ export class DocumentDO {
     }
 
     const now = new Date().toISOString();
+    const incomingTags = normalizeTagsInput(payload.tags);
     const nextRecord: DocumentRecord = {
       ...record,
       title: (payload.title as string | undefined) ?? record.title,
       content: (payload.content as string | undefined) ?? record.content,
-      tags: Array.isArray(payload.tags) ? (payload.tags as string[]) : record.tags,
+      tags: incomingTags ?? record.tags,
       updatedAt: now,
       version: record.version + 1,
     };
@@ -745,7 +809,7 @@ export class DocumentDO {
         ownerId,
         title: (body.title as string | undefined) ?? '',
         content: (body.content as string | undefined) ?? '',
-        tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
+        tags: ensureDocumentTags(body.tags),
         createdAt: now,
         updatedAt: now,
         version: 1,
@@ -768,11 +832,12 @@ export class DocumentDO {
       });
     }
 
+    const incomingTags = normalizeTagsInput(body.tags);
     const updated: DocumentRecord = {
       ...existing,
       title: (body.title as string | undefined) ?? existing.title,
       content: (body.content as string | undefined) ?? existing.content,
-      tags: Array.isArray(body.tags) ? (body.tags as string[]) : existing.tags,
+      tags: incomingTags ?? existing.tags,
       updatedAt: now,
       version: existing.version + 1,
     };
@@ -791,8 +856,17 @@ export class DocumentDO {
     if (this.document) {
       return this.document;
     }
-    this.document = (await this.state.storage.get<DocumentRecord>('document')) ?? null;
-    return this.document;
+    const stored = (await this.state.storage.get<DocumentRecord>('document')) ?? null;
+    if (!stored) {
+      this.document = null;
+      return null;
+    }
+    const normalized: DocumentRecord = {
+      ...stored,
+      tags: ensureDocumentTags(stored.tags),
+    };
+    this.document = normalized;
+    return normalized;
   }
 
   private broadcastToOthers(origin: WebSocket, payload: JsonValue): void {

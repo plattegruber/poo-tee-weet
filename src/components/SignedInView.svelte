@@ -27,6 +27,7 @@
 
   type DocumentIndexResponse = {
     documents: DocumentIndexEntry[];
+    tags?: string[];
   };
 
   const workerBaseUrl = import.meta.env.VITE_WORKER_BASE_URL;
@@ -45,6 +46,8 @@
   const DEFAULT_BODY = `<p>A distraction free writing tool.</p><p>So it goes.</p>`;
   const DEFAULT_MARKUP = `<h1>${DEFAULT_TITLE}</h1>${DEFAULT_BODY}`;
   const BLANK_DOCUMENT_MARKUP = '<h1></h1><p><br /></p>';
+  const MAX_TAGS_PER_DOCUMENT = 20;
+  const MAX_TAG_LENGTH = 48;
   const SIDEBAR_HIDE_DELAY_MS = 180;
   const TOUCH_EDGE_THRESHOLD_PX = 32;
   const TOUCH_OPEN_DISTANCE_PX = 48;
@@ -57,6 +60,9 @@
   let docId = $state<string | null>(null);
   let hasInitialized = false;
 
+  let documentTags = $state<string[]>([]);
+  let tagInputValue = $state('');
+  let selectedTags = $state<string[]>([]);
   let isDirty = $state(false);
   let saveError = $state<string | null>(null);
   let lastSavedAt = $state<string | null>(null);
@@ -106,9 +112,15 @@
   let ignoreNextPopStateClose = false;
   let touchStartX: number | null = null;
 
+  const availableTags = $derived.by(() => buildTagCloud(documents));
+  const filteredDocuments = $derived.by(() =>
+    filterDocumentsByTags(documents, selectedTags)
+  );
+
   type RealtimeUpdatePayload = {
     title: string;
     content: string;
+    tags: string[];
   };
 
   type RealtimeServerMessage =
@@ -133,6 +145,19 @@
     return sessionId ? `ptw-doc-${sessionId}` : null;
   });
 
+  $effect(() => {
+    if (selectedTags.length === 0) {
+      return;
+    }
+    const availableKeys = new Set(availableTags.map((tag) => tag.toLowerCase()));
+    const nextSelection = selectedTags.filter((tag) =>
+      availableKeys.has(tag.toLowerCase())
+    );
+    if (nextSelection.length !== selectedTags.length) {
+      selectedTags = nextSelection;
+    }
+  });
+
   const formatTimestamp = (iso: string) => {
     try {
       const value = new Date(iso);
@@ -151,6 +176,92 @@
     return sanitized || DEFAULT_UNTITLED;
   };
 
+  const normalizeTagValue = (value: string | null | undefined) => {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const trimmed = value.replace(/\s+/g, ' ').trim();
+    if (!trimmed) {
+      return null;
+    }
+    return trimmed.slice(0, MAX_TAG_LENGTH);
+  };
+
+  const normalizeTagList = (list: string[] | null | undefined): string[] => {
+    if (!Array.isArray(list)) {
+      return [];
+    }
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    for (const item of list) {
+      const sanitized = normalizeTagValue(item);
+      if (!sanitized) {
+        continue;
+      }
+      const key = sanitized.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      normalized.push(sanitized);
+      if (normalized.length >= MAX_TAGS_PER_DOCUMENT) {
+        break;
+      }
+    }
+    return normalized;
+  };
+
+  const areTagListsEqual = (a: string[], b: string[]) => {
+    if (a.length !== b.length) {
+      return false;
+    }
+    return a.every((value, index) => value === b[index]);
+  };
+
+  const buildTagCloud = (entries: DocumentIndexEntry[]): string[] => {
+    if (!entries.length) {
+      return [];
+    }
+    const map = new Map<string, { label: string; count: number }>();
+    for (const entry of entries) {
+      for (const tag of entry.tags ?? []) {
+        const sanitized = normalizeTagValue(tag);
+        if (!sanitized) {
+          continue;
+        }
+        const key = sanitized.toLowerCase();
+        const bucket = map.get(key);
+        if (bucket) {
+          bucket.count += 1;
+        } else {
+          map.set(key, { label: sanitized, count: 1 });
+        }
+      }
+    }
+    return Array.from(map.values())
+      .sort((a, b) => {
+        if (b.count !== a.count) {
+          return b.count - a.count;
+        }
+        return a.label.localeCompare(b.label);
+      })
+      .map((item) => item.label);
+  };
+
+  const filterDocumentsByTags = (
+    entries: DocumentIndexEntry[],
+    selected: string[]
+  ): DocumentIndexEntry[] => {
+    if (!selected.length) {
+      return entries;
+    }
+    const needles = selected.map((tag) => tag.toLowerCase());
+    return entries.filter((entry) => {
+      const haystack = entry.tags.map((tag) => tag.toLowerCase());
+      return needles.every((needle) => haystack.includes(needle));
+    });
+  };
+
   const toDocumentMetadata = (record: DocumentRecord): DocumentIndexEntry => {
     return {
       docId: record.docId,
@@ -166,6 +277,7 @@
     return {
       ...entry,
       title: resolveTitleText(entry.title),
+      tags: normalizeTagList(entry.tags),
     };
   };
 
@@ -202,6 +314,142 @@
     documents = documents.map((item, index) => {
       return index === existingIndex ? { ...item, ...normalized } : item;
     });
+  };
+
+  const setDocumentTagsState = (value: string[] | null | undefined) => {
+    const normalized = normalizeTagList(value);
+    documentTags = normalized;
+    tagInputValue = '';
+  };
+
+  const upsertCurrentDocumentTags = (normalized: string[]) => {
+    if (!docId) {
+      return;
+    }
+    const target = documents.find((entry) => entry.docId === docId);
+    if (target) {
+      if (areTagListsEqual(target.tags, normalized)) {
+        return;
+      }
+      updateDocumentIndexEntry({ ...target, tags: normalized });
+      return;
+    }
+    const timestamp = new Date().toISOString();
+    updateDocumentIndexEntry(
+      {
+        docId,
+        title: resolveTitleText(titleElement?.textContent ?? DEFAULT_UNTITLED),
+        tags: normalized,
+        updatedAt: lastSavedAt ?? timestamp,
+        createdAt: lastSavedAt ?? timestamp,
+        version: 0,
+      },
+      { insertAtStart: true }
+    );
+  };
+
+  const persistDocumentTags = (
+    next: string[],
+    options: { skipRealtime?: boolean } = {}
+  ) => {
+    const normalized = normalizeTagList(next);
+    if (areTagListsEqual(documentTags, normalized)) {
+      tagInputValue = '';
+      return;
+    }
+    documentTags = normalized;
+    tagInputValue = '';
+    upsertCurrentDocumentTags(normalized);
+    if (!options.skipRealtime) {
+      isDirty = true;
+      queueRealtimeUpdate({ immediate: true });
+    }
+  };
+
+  const handleTagRemove = (tag: string) => {
+    const key = tag.toLowerCase();
+    const next = documentTags.filter((item) => item.toLowerCase() !== key);
+    if (next.length === documentTags.length) {
+      return;
+    }
+    persistDocumentTags(next);
+  };
+
+  const commitTagValue = (raw: string) => {
+    const sanitized = normalizeTagValue(raw);
+    if (!sanitized) {
+      tagInputValue = '';
+      return;
+    }
+    if (documentTags.some((tag) => tag.toLowerCase() === sanitized.toLowerCase())) {
+      tagInputValue = '';
+      return;
+    }
+    if (documentTags.length >= MAX_TAGS_PER_DOCUMENT) {
+      tagInputValue = '';
+      return;
+    }
+    persistDocumentTags([...documentTags, sanitized]);
+  };
+
+  const handleTagInputKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Enter' || event.key === ',') {
+      event.preventDefault();
+      commitTagValue(tagInputValue);
+      return;
+    }
+    if (event.key === 'Tab') {
+      if (tagInputValue.trim()) {
+        event.preventDefault();
+        commitTagValue(tagInputValue);
+      }
+      return;
+    }
+    if (event.key === 'Backspace' && tagInputValue.trim() === '') {
+      if (documentTags.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      persistDocumentTags(documentTags.slice(0, -1));
+    }
+  };
+
+  const handleTagInputBlur = () => {
+    if (tagInputValue.trim()) {
+      commitTagValue(tagInputValue);
+    }
+  };
+
+  const clearTagFilter = () => {
+    if (selectedTags.length === 0) {
+      return;
+    }
+    selectedTags = [];
+  };
+
+  const isTagSelected = (tag: string) => {
+    const normalized = normalizeTagValue(tag);
+    if (!normalized) {
+      return false;
+    }
+    const key = normalized.toLowerCase();
+    return selectedTags.some((value) => value.toLowerCase() === key);
+  };
+
+  const toggleTagSelection = (tag: string) => {
+    const normalized = normalizeTagValue(tag);
+    if (!normalized) {
+      return;
+    }
+    const key = normalized.toLowerCase();
+    const existingIndex = selectedTags.findIndex(
+      (value) => value.toLowerCase() === key
+    );
+    if (existingIndex === -1) {
+      selectedTags = [...selectedTags, normalized];
+      return;
+    }
+    selectedTags = selectedTags.filter((_, index) => index !== existingIndex);
   };
 
   const escapeHtml = (value: string) => {
@@ -446,7 +694,7 @@
     if (!docId) return null;
     const title = resolveTitleText(titleElement?.textContent ?? '') || DEFAULT_TITLE;
     const content = serializeDocument();
-    return { title, content };
+    return { title, content, tags: [...documentTags] };
   };
 
   const sendPendingRealtimePayload = (
@@ -465,6 +713,7 @@
       id: messageId,
       title: payload.title,
       content: payload.content,
+      tags: payload.tags,
     };
 
     try {
@@ -552,6 +801,7 @@
     }
 
     lastSavedAt = record.updatedAt;
+    setDocumentTagsState(record.tags);
     updateDocumentIndexEntry(toDocumentMetadata(record));
 
     if (!allowDomUpdate) {
@@ -795,6 +1045,7 @@
     updateDocumentIndexEntry(toDocumentMetadata(payload.document), {
       insertAtStart: true,
     });
+    setDocumentTagsState(payload.document.tags);
 
     const { titleText, bodyHtml } = splitDocumentContent(
       payload.document.content || DEFAULT_MARKUP
@@ -832,6 +1083,7 @@
     saveError = null;
     isDirty = false;
     updateDocumentIndexEntry(toDocumentMetadata(payload.document));
+    setDocumentTagsState(payload.document.tags);
 
     if (isBrowser) {
       window.localStorage.setItem(key, docId);
@@ -898,7 +1150,7 @@
         updatedAt: lastSavedAt ?? timestamp,
         createdAt: lastSavedAt ?? timestamp,
         version: 0,
-        tags: [],
+        tags: documentTags,
       }, { insertAtStart: true });
     }
   };
@@ -1147,6 +1399,7 @@
       updateDocumentIndexEntry(toDocumentMetadata(payload.document), {
         insertAtStart: true,
       });
+      setDocumentTagsState(payload.document.tags);
 
       const { titleText, bodyHtml } = splitDocumentContent(
         payload.document.content || BLANK_DOCUMENT_MARKUP
@@ -1244,6 +1497,45 @@
           New document
         </button>
 
+        {#if availableTags.length > 0 || selectedTags.length > 0}
+          <section class="mb-4" aria-label="Tag filter">
+            <div class="mb-2 flex items-center justify-end">
+              {#if selectedTags.length > 0}
+                <button
+                  type="button"
+                  class="text-xs font-semibold uppercase tracking-wide text-accent transition hover:text-accent/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  onclick={clearTagFilter}
+                  tabindex={sidebarVisible ? 0 : -1}
+                >
+                  Clear
+                </button>
+              {/if}
+            </div>
+
+            {#if availableTags.length > 0}
+              <ul class="flex flex-wrap gap-2">
+                {#each availableTags as tag (tag.toLowerCase())}
+                  <li>
+                    <button
+                      type="button"
+                      class={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ring-1 ring-inset transition focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
+                        isTagSelected(tag)
+                          ? 'bg-accent text-white ring-accent'
+                          : 'bg-gray-50 text-gray-700 ring-gray-200 hover:ring-gray-300'
+                      }`}
+                      aria-pressed={isTagSelected(tag)}
+                      onclick={() => toggleTagSelection(tag)}
+                      tabindex={sidebarVisible ? 0 : -1}
+                    >
+                      {tag}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </section>
+        {/if}
+
         {#if indexError}
           <p class="mb-3 text-sm text-editor-error">{indexError}</p>
         {/if}
@@ -1252,11 +1544,13 @@
           <p class="mb-4 text-sm text-editor-busy">Loading…</p>
         {:else if documents.length === 0}
           <p class="mb-4 text-sm text-editor-busy">No saved documents yet.</p>
+        {:else if filteredDocuments.length === 0}
+          <p class="mb-4 text-sm text-editor-busy">No documents match the selected tags.</p>
         {/if}
 
         <nav class="flex-1" aria-label="Document titles">
           <ul class="flex-1 space-y-1 overflow-y-auto pb-2">
-            {#each documents as entry (entry.docId)}
+            {#each filteredDocuments as entry (entry.docId)}
               <li>
                 <button
                   type="button"
@@ -1308,6 +1602,47 @@
         >
           {DEFAULT_TITLE}
         </h1>
+
+        <div class="mb-8">
+          <div class="flex flex-wrap items-center gap-2 rounded-md border border-black/10 bg-white/80 px-3 py-2">
+            {#each documentTags as tag (tag)}
+              <span class="inline-flex items-center gap-x-1.5 rounded-full bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-500/15">
+                <span>{tag}</span>
+                <button
+                  type="button"
+                  class="group relative -mr-1 flex h-4 w-4 items-center justify-center rounded-sm text-gray-500 transition hover:bg-gray-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  onclick={() => handleTagRemove(tag)}
+                >
+                  <span class="sr-only">Remove {tag}</span>
+                  <svg
+                    viewBox="0 0 14 14"
+                    class="h-3.5 w-3.5 stroke-gray-500/70 group-hover:stroke-gray-600"
+                    aria-hidden="true"
+                  >
+                    <path d="M4 4l6 6m0-6-6 6" fill="none" stroke-width="1.5" stroke-linecap="round" />
+                  </svg>
+                </button>
+              </span>
+            {/each}
+
+            <input
+              id="document-tags-input"
+              type="text"
+              class="flex-1 border-none bg-transparent text-sm text-editor-text placeholder:text-editor-busy outline-none focus:outline-none"
+              placeholder={documentTags.length === 0 ? 'Add a tag…' : 'Add another tag'}
+              bind:value={tagInputValue}
+              onkeydown={handleTagInputKeydown}
+              onblur={handleTagInputBlur}
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
+          </div>
+
+          {#if documentTags.length >= MAX_TAGS_PER_DOCUMENT}
+            <p class="mt-2 text-xs text-editor-error">Tag limit reached.</p>
+          {/if}
+        </div>
 
         <div
           class="tab-size-4 w-full flex-1 text-lg leading-relaxed focus:outline-none"
@@ -1371,6 +1706,43 @@
           New document
         </button>
 
+        {#if availableTags.length > 0 || selectedTags.length > 0}
+          <section class="mb-4" aria-label="Tag filter">
+            <div class="mb-2 flex items-center justify-end">
+              {#if selectedTags.length > 0}
+                <button
+                  type="button"
+                  class="text-xs font-semibold uppercase tracking-wide text-accent transition hover:text-accent/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  onclick={clearTagFilter}
+                >
+                  Clear
+                </button>
+              {/if}
+            </div>
+
+            {#if availableTags.length > 0}
+              <ul class="flex flex-wrap gap-2">
+                {#each availableTags as tag (tag.toLowerCase())}
+                  <li>
+                    <button
+                      type="button"
+                      class={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ring-1 ring-inset transition focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
+                        isTagSelected(tag)
+                          ? 'bg-accent text-white ring-accent'
+                          : 'bg-gray-50 text-gray-700 ring-gray-200 hover:ring-gray-300'
+                      }`}
+                      aria-pressed={isTagSelected(tag)}
+                      onclick={() => toggleTagSelection(tag)}
+                    >
+                      {tag}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </section>
+        {/if}
+
         {#if indexError}
           <p class="mb-3 text-sm text-editor-error">{indexError}</p>
         {/if}
@@ -1379,11 +1751,13 @@
           <p class="mb-4 text-sm text-editor-busy">Loading…</p>
         {:else if documents.length === 0}
           <p class="mb-4 text-sm text-editor-busy">No saved documents yet.</p>
+        {:else if filteredDocuments.length === 0}
+          <p class="mb-4 text-sm text-editor-busy">No documents match the selected tags.</p>
         {/if}
 
         <nav aria-label="Document titles">
           <ul class="space-y-1 overflow-y-auto">
-            {#each documents as entry (entry.docId)}
+            {#each filteredDocuments as entry (entry.docId)}
               <li>
                 <button
                   type="button"
