@@ -588,10 +588,8 @@ export class DocumentDO {
   private env: Env;
   private document: DocumentRecord | null = null;
   private dirty = false;
-  private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persistPromise: Promise<void> | null = null;
   private connections = new Map<WebSocket, { userId: string }>();
-  private static readonly PERSIST_DELAY_MS = 1000;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -747,6 +745,7 @@ export class DocumentDO {
 
     this.document = nextRecord;
     this.dirty = true;
+    await this.persistNow();
 
     const ackPayload = {
       type: 'ack',
@@ -755,7 +754,6 @@ export class DocumentDO {
     };
     ws.send(JSON.stringify(ackPayload));
     this.broadcastToOthers(ws, { type: 'remote-update', document: nextRecord });
-    this.schedulePersist();
   }
 
   private async readDocument(userId: string): Promise<Response> {
@@ -881,27 +879,12 @@ export class DocumentDO {
     }
   }
 
-  private schedulePersist(): void {
-    if (this.persistTimer) {
-      return;
-    }
-    this.persistTimer = setTimeout(() => {
-      this.persistTimer = null;
-      void this.persistNow();
-    }, DocumentDO.PERSIST_DELAY_MS);
-  }
-
   private async persistNow(force = false): Promise<void> {
     if (!this.document) {
       return;
     }
     if (!force && !this.dirty) {
       return;
-    }
-
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-      this.persistTimer = null;
     }
 
     if (this.persistPromise) {
