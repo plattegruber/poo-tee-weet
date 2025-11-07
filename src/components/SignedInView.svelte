@@ -1466,9 +1466,12 @@
   ontouchend={handleTouchEnd}
   ontouchcancel={handleTouchCancel}
 >
-  <div class="mx-auto flex min-h-screen w-full max-w-5xl flex-col md:grid md:grid-cols-[300px_minmax(0,1fr)_220px]">
+  <div
+    class="flex min-h-screen w-full flex-col md:grid md:gap-12 md:[grid-template-columns:minmax(var(--edge-min),var(--edge-max))_minmax(var(--editor-min),var(--editor-max))_minmax(var(--edge-min),var(--edge-max))]"
+    style="--edge-min: 12rem; --edge-max: min(20rem, 18vw); --editor-min: 28rem; --editor-max: min(70rem, calc(100vw - (2 * var(--edge-min))));"
+  >
     <div
-      class="relative hidden h-full w-[18rem] md:block"
+      class="relative hidden h-full md:block"
       onpointerenter={handleSidebarPointerEnter}
       onpointerleave={handleSidebarPointerLeave}
     >
@@ -1571,7 +1574,7 @@
       </aside>
     </div>
 
-    <main class="relative flex min-h-screen flex-col px-6 pb-24 pt-16 md:px-12 md:pb-32 md:pt-20">
+    <main class="relative flex min-h-screen flex-col px-4 pb-24 pt-16 sm:px-8 md:px-10 md:pb-32 md:pt-20">
       <button
         type="button"
         class="absolute left-6 top-6 z-30 flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white shadow-md transition hover:bg-editor-background focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 md:hidden"
@@ -1585,96 +1588,98 @@
         </span>
       </button>
 
-      <section class="mx-auto flex w-full max-w-3xl flex-1 flex-col">
-        <h1
-          class="mb-6 w-full text-4xl font-heading leading-tight focus:outline-none"
-          bind:this={titleElement}
-          contenteditable="true"
-          spellcheck="false"
-          autocapitalize="off"
-          translate="no"
-          lang="en"
-          aria-label="Document title"
-          oninput={handleTitleInput}
-          onblur={handleTitleBlur}
-          onkeydown={handleTitleKeydown}
-          data-testid="editor-title"
-        >
-          {DEFAULT_TITLE}
-        </h1>
+      <section class="flex w-full flex-1 flex-col px-4 sm:px-6 lg:px-10">
+        <div class="mx-auto flex w-full max-w-3xl flex-1 flex-col">
+          <h1
+            class="mb-6 w-full text-4xl font-heading leading-tight focus:outline-none"
+            bind:this={titleElement}
+            contenteditable="true"
+            spellcheck="false"
+            autocapitalize="off"
+            translate="no"
+            lang="en"
+            aria-label="Document title"
+            oninput={handleTitleInput}
+            onblur={handleTitleBlur}
+            onkeydown={handleTitleKeydown}
+            data-testid="editor-title"
+          >
+            {DEFAULT_TITLE}
+          </h1>
 
-        <div class="mb-8">
-          <div class="flex flex-wrap items-center gap-2 rounded-md border border-black/10 bg-white/80 px-3 py-2">
-            {#each documentTags as tag (tag)}
-              <span class="inline-flex items-center gap-x-1.5 rounded-full bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-500/15">
-                <span>{tag}</span>
-                <button
-                  type="button"
-                  class="group relative -mr-1 flex h-4 w-4 items-center justify-center rounded-sm text-gray-500 transition hover:bg-gray-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-                  onclick={() => handleTagRemove(tag)}
-                >
-                  <span class="sr-only">Remove {tag}</span>
-                  <svg
-                    viewBox="0 0 14 14"
-                    class="h-3.5 w-3.5 stroke-gray-500/70 group-hover:stroke-gray-600"
-                    aria-hidden="true"
+          <div class="mb-8">
+            <div class="flex flex-wrap items-center gap-2 rounded-md border border-black/10 bg-white/80 px-3 py-2">
+              {#each documentTags as tag (tag)}
+                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-500/15">
+                  <span>{tag}</span>
+                  <button
+                    type="button"
+                    class="group relative -mr-1 flex h-4 w-4 items-center justify-center rounded-sm text-gray-500 transition hover:bg-gray-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                    onclick={() => handleTagRemove(tag)}
                   >
-                    <path d="M4 4l6 6m0-6-6 6" fill="none" stroke-width="1.5" stroke-linecap="round" />
-                  </svg>
-                </button>
-              </span>
-            {/each}
+                    <span class="sr-only">Remove {tag}</span>
+                    <svg
+                      viewBox="0 0 14 14"
+                      class="h-3.5 w-3.5 stroke-gray-500/70 group-hover:stroke-gray-600"
+                      aria-hidden="true"
+                    >
+                      <path d="M4 4l6 6m0-6-6 6" fill="none" stroke-width="1.5" stroke-linecap="round" />
+                    </svg>
+                  </button>
+                </span>
+              {/each}
 
-            <input
-              id="document-tags-input"
-              type="text"
-              class="flex-1 border-none bg-transparent text-sm text-editor-text placeholder:text-editor-busy outline-none focus:outline-none"
-              placeholder={documentTags.length === 0 ? 'Add a tag…' : 'Add another tag'}
-              bind:value={tagInputValue}
-              onkeydown={handleTagInputKeydown}
-              onblur={handleTagInputBlur}
-              autocomplete="off"
-              autocapitalize="off"
-              spellcheck="false"
-            />
+              <input
+                id="document-tags-input"
+                type="text"
+                class="flex-1 border-none bg-transparent text-sm text-editor-text placeholder:text-editor-busy outline-none focus:outline-none"
+                placeholder={documentTags.length === 0 ? 'Add a tag…' : 'Add another tag'}
+                bind:value={tagInputValue}
+                onkeydown={handleTagInputKeydown}
+                onblur={handleTagInputBlur}
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+              />
+            </div>
+
+            {#if documentTags.length >= MAX_TAGS_PER_DOCUMENT}
+              <p class="mt-2 text-xs text-editor-error">Tag limit reached.</p>
+            {/if}
           </div>
 
-          {#if documentTags.length >= MAX_TAGS_PER_DOCUMENT}
-            <p class="mt-2 text-xs text-editor-error">Tag limit reached.</p>
-          {/if}
-        </div>
+          <div
+            class="tab-size-4 w-full flex-1 text-lg leading-relaxed focus:outline-none"
+            bind:this={editor}
+            contenteditable="true"
+            spellcheck="false"
+            autocapitalize="off"
+            translate="no"
+            lang="en"
+            aria-label="Writing editor"
+            role="textbox"
+            aria-multiline="true"
+            tabindex="0"
+            oninput={handleInput}
+            onblur={handleBlur}
+            onkeydown={handleEditorKeydown}
+            data-testid="editor-body"
+          >
+            {@html DEFAULT_BODY}
+          </div>
 
-        <div
-          class="tab-size-4 w-full flex-1 text-lg leading-relaxed focus:outline-none"
-          bind:this={editor}
-          contenteditable="true"
-          spellcheck="false"
-          autocapitalize="off"
-          translate="no"
-          lang="en"
-          aria-label="Writing editor"
-          role="textbox"
-          aria-multiline="true"
-          tabindex="0"
-          oninput={handleInput}
-          onblur={handleBlur}
-          onkeydown={handleEditorKeydown}
-          data-testid="editor-body"
-        >
-          {@html DEFAULT_BODY}
-        </div>
-
-        <div class="mt-6 text-sm leading-heading" aria-live="polite">
-          {#if saveError}
-            <span class="inline-flex items-center gap-1 text-editor-error">
-              We hit a snag saving: {saveError}
-            </span>
-          {/if}
+          <div class="mt-6 text-sm leading-heading" aria-live="polite">
+            {#if saveError}
+              <span class="inline-flex items-center gap-1 text-editor-error">
+                We hit a snag saving: {saveError}
+              </span>
+            {/if}
+          </div>
         </div>
       </section>
     </main>
 
-    <div class="hidden md:block" aria-hidden="true"></div>
+    <div class="relative hidden h-full md:block" aria-hidden="true"></div>
   </div>
 
   {#if isMobileMenuOpen}
