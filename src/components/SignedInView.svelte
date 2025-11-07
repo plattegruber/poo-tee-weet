@@ -38,7 +38,8 @@
   }
 
   const TOKEN_TEMPLATE = 'poo-tee-weet';
-  const SAVE_DEBOUNCE_MS = 1500;
+  const REALTIME_SEND_INTERVAL_MS = 350;
+  const REALTIME_RECONNECT_DELAY_MS = 2000;
   const DEFAULT_TITLE = 'Welcome to poo-tee-weet';
   const DEFAULT_UNTITLED = '(No title)';
   const DEFAULT_BODY = `<p>A distraction free writing tool.</p><p>So it goes.</p>`;
@@ -54,13 +55,42 @@
   let titleElement: HTMLElement | null = null;
   let editor: HTMLElement | null = null;
   let docId = $state<string | null>(null);
-  let pendingSave: ReturnType<typeof setTimeout> | null = null;
   let hasInitialized = false;
 
-  let isSaving = $state(false);
   let isDirty = $state(false);
   let saveError = $state<string | null>(null);
   let lastSavedAt = $state<string | null>(null);
+  let realtimeStatus = $state<'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'>(
+    'idle'
+  );
+  let realtimeError = $state<string | null>(null);
+  const realtimeStatusLabel = $derived.by(() => {
+    switch (realtimeStatus) {
+      case 'connected':
+        return 'Connected to autosave service';
+      case 'connecting':
+        return 'Connecting to autosave service';
+      case 'error':
+        return 'Autosave connection error';
+      case 'disconnected':
+        return 'Autosave is offline';
+      default:
+        return 'Autosave idle';
+    }
+  });
+  const REALTIME_STATUS_STYLES: Record<
+    'idle' | 'connecting' | 'connected' | 'disconnected' | 'error',
+    string
+  > = {
+    idle: 'bg-gray-300 text-white',
+    connecting: 'bg-amber-400 text-white',
+    connected: 'bg-emerald-500 text-white',
+    disconnected: 'bg-gray-400 text-white',
+    error: 'bg-red-500 text-white',
+  };
+  const realtimeIndicatorClass = $derived.by(() => {
+    return REALTIME_STATUS_STYLES[realtimeStatus] ?? REALTIME_STATUS_STYLES.idle;
+  });
   let documents = $state<DocumentIndexEntry[]>([]);
   let isIndexLoading = $state(false);
   let indexError = $state<string | null>(null);
@@ -75,6 +105,28 @@
   let mobileMenuHistoryActive = false;
   let ignoreNextPopStateClose = false;
   let touchStartX: number | null = null;
+
+  type RealtimeUpdatePayload = {
+    title: string;
+    content: string;
+  };
+
+  type RealtimeServerMessage =
+    | { type: 'snapshot'; document: DocumentRecord }
+    | { type: 'ack'; id?: number; document: DocumentRecord }
+    | { type: 'remote-update'; document: DocumentRecord }
+    | { type: 'error'; message?: string }
+    | { type: 'pong'; timestamp: string };
+
+  let realtimeSocket: WebSocket | null = null;
+  let realtimeDocId: string | null = null;
+  let desiredRealtimeDocId: string | null = null;
+  let realtimeSendTimer: ReturnType<typeof setTimeout> | null = null;
+  let realtimeReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRealtimePayload: RealtimeUpdatePayload | null = null;
+  const pendingAckIds = new Set<number>();
+  const ackResolvers = new Map<number, (value: void) => void>();
+  let clientMessageCounter = 0;
 
   const storageKey = $derived.by(() => {
     const sessionId = clerk.session?.id ?? null;
@@ -381,6 +433,324 @@
     }
   };
 
+  const resolveRealtimeUrl = (targetDocId: string, token: string) => {
+    const base = new URL(workerBaseUrl);
+    base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+    base.pathname = `/docs/${targetDocId}/sync`;
+    base.search = '';
+    base.searchParams.set('auth', token);
+    return base.toString();
+  };
+
+  const captureRealtimePayload = (): RealtimeUpdatePayload | null => {
+    if (!docId) return null;
+    const title = resolveTitleText(titleElement?.textContent ?? '') || DEFAULT_TITLE;
+    const content = serializeDocument();
+    return { title, content };
+  };
+
+  const sendPendingRealtimePayload = (
+    trackAck = false
+  ): { id: number; promise: Promise<void> } | null => {
+    if (!pendingRealtimePayload) return null;
+    if (!realtimeSocket || realtimeSocket.readyState !== WebSocket.OPEN) {
+      return null;
+    }
+
+    const payload = pendingRealtimePayload;
+    pendingRealtimePayload = null;
+    const messageId = ++clientMessageCounter;
+    const message = {
+      type: 'update',
+      id: messageId,
+      title: payload.title,
+      content: payload.content,
+    };
+
+    try {
+      realtimeSocket.send(JSON.stringify(message));
+      pendingAckIds.add(messageId);
+    } catch (error) {
+      pendingRealtimePayload = payload;
+      realtimeStatus = 'error';
+      realtimeError = error instanceof Error ? error.message : String(error);
+      saveError = realtimeError;
+      return null;
+    }
+
+    if (!trackAck) {
+      return null;
+    }
+
+    const promise = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ackResolvers.delete(messageId);
+        reject(new Error('Timed out waiting for realtime acknowledgement'));
+      }, 5000);
+      ackResolvers.set(messageId, () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+
+    return { id: messageId, promise };
+  };
+
+  const queueRealtimeUpdate = (options: { immediate?: boolean } = {}) => {
+    if (!isBrowser) return;
+    const payload = captureRealtimePayload();
+    if (!payload) return;
+    pendingRealtimePayload = payload;
+    isDirty = true;
+
+    if (!realtimeSocket || realtimeSocket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    if (options.immediate) {
+      sendPendingRealtimePayload();
+      return;
+    }
+
+    if (realtimeSendTimer) {
+      return;
+    }
+
+    realtimeSendTimer = setTimeout(() => {
+      realtimeSendTimer = null;
+      sendPendingRealtimePayload();
+    }, REALTIME_SEND_INTERVAL_MS);
+  };
+
+  const flushRealtimeUpdates = async () => {
+    if (!isBrowser) return;
+    if (realtimeSendTimer) {
+      clearTimeout(realtimeSendTimer);
+      realtimeSendTimer = null;
+    }
+
+    if (!pendingRealtimePayload) {
+      const payload = captureRealtimePayload();
+      if (payload) {
+        pendingRealtimePayload = payload;
+      }
+    }
+
+    const tracked = sendPendingRealtimePayload(true);
+    if (tracked) {
+      try {
+        await tracked.promise;
+      } catch (error) {
+        saveError = error instanceof Error ? error.message : String(error);
+      }
+    }
+  };
+
+  const applyDocumentMetadata = (record: DocumentRecord, allowDomUpdate: boolean) => {
+    if (!docId || record.docId !== docId) {
+      return;
+    }
+
+    lastSavedAt = record.updatedAt;
+    updateDocumentIndexEntry(toDocumentMetadata(record));
+
+    if (!allowDomUpdate) {
+      return;
+    }
+
+    if (isDirty || pendingRealtimePayload || pendingAckIds.size > 0) {
+      return;
+    }
+
+    const { titleText, bodyHtml } = splitDocumentContent(
+      record.content || DEFAULT_MARKUP
+    );
+    applyDocumentContent(titleText, bodyHtml);
+    updateCurrentDocumentTitle(titleText);
+  };
+
+  const handleRealtimeAck = (payload: { id?: number; document: DocumentRecord }) => {
+    if (typeof payload.id === 'number') {
+      pendingAckIds.delete(payload.id);
+      const resolver = ackResolvers.get(payload.id);
+      if (resolver) {
+        ackResolvers.delete(payload.id);
+        resolver();
+      }
+    }
+
+    applyDocumentMetadata(payload.document, false);
+    isDirty = pendingAckIds.size > 0 || !!pendingRealtimePayload;
+    saveError = null;
+  };
+
+  const handleRealtimeMessage = (event: MessageEvent) => {
+    if (event.target !== realtimeSocket) {
+      return;
+    }
+
+    let payload: RealtimeServerMessage | null = null;
+    try {
+      if (typeof event.data !== 'string') {
+        return;
+      }
+      payload = JSON.parse(event.data) as RealtimeServerMessage;
+    } catch {
+      return;
+    }
+
+    if (!payload) {
+      return;
+    }
+
+    switch (payload.type) {
+      case 'snapshot':
+        applyDocumentMetadata(payload.document, true);
+        break;
+      case 'ack':
+        handleRealtimeAck(payload);
+        break;
+      case 'remote-update':
+        applyDocumentMetadata(payload.document, true);
+        break;
+      case 'error':
+        realtimeStatus = 'error';
+        realtimeError = payload.message ?? 'Realtime sync error';
+        saveError = realtimeError;
+        break;
+      default:
+        break;
+    }
+  };
+
+  const handleRealtimeOpen = (event: Event) => {
+    if (event.target !== realtimeSocket) {
+      return;
+    }
+    realtimeStatus = 'connected';
+    realtimeError = null;
+    saveError = null;
+    if (pendingRealtimePayload) {
+      sendPendingRealtimePayload();
+    }
+  };
+
+  const handleRealtimeClose = (event: CloseEvent) => {
+    const closedDocId = realtimeDocId;
+    if (event.target !== realtimeSocket) {
+      return;
+    }
+
+    realtimeSocket = null;
+    realtimeDocId = null;
+    realtimeStatus = 'disconnected';
+
+    if (pendingAckIds.size > 0 || pendingRealtimePayload) {
+      isDirty = true;
+    }
+
+    if (!pendingRealtimePayload) {
+      const payload = captureRealtimePayload();
+      if (payload) {
+        pendingRealtimePayload = payload;
+        isDirty = true;
+      }
+    }
+
+    if (desiredRealtimeDocId && desiredRealtimeDocId === closedDocId) {
+      scheduleRealtimeReconnect(closedDocId);
+    }
+  };
+
+  const handleRealtimeError = (event: Event) => {
+    if (event.target !== realtimeSocket) {
+      return;
+    }
+    realtimeStatus = 'error';
+    realtimeError = 'Realtime connection error';
+    saveError = realtimeError;
+  };
+
+  const detachRealtimeListeners = (socket: WebSocket) => {
+    socket.removeEventListener('open', handleRealtimeOpen);
+    socket.removeEventListener('message', handleRealtimeMessage);
+    socket.removeEventListener('error', handleRealtimeError);
+    socket.removeEventListener('close', handleRealtimeClose);
+  };
+
+  const attachRealtimeListeners = (socket: WebSocket) => {
+    socket.addEventListener('open', handleRealtimeOpen);
+    socket.addEventListener('message', handleRealtimeMessage);
+    socket.addEventListener('error', handleRealtimeError);
+    socket.addEventListener('close', handleRealtimeClose);
+  };
+
+  const scheduleRealtimeReconnect = (docToReconnect: string | null) => {
+    if (!docToReconnect) return;
+    if (realtimeReconnectTimer) return;
+    realtimeReconnectTimer = setTimeout(() => {
+      realtimeReconnectTimer = null;
+      if (desiredRealtimeDocId === docToReconnect) {
+        void establishRealtimeConnection(docToReconnect);
+      }
+    }, REALTIME_RECONNECT_DELAY_MS);
+  };
+
+  const teardownRealtimeConnection = (resetTarget = false) => {
+    if (realtimeReconnectTimer) {
+      clearTimeout(realtimeReconnectTimer);
+      realtimeReconnectTimer = null;
+    }
+
+    if (realtimeSocket) {
+      detachRealtimeListeners(realtimeSocket);
+      realtimeSocket.close();
+      realtimeSocket = null;
+    }
+
+    if (resetTarget) {
+      desiredRealtimeDocId = null;
+      realtimeDocId = null;
+      realtimeStatus = 'idle';
+    }
+  };
+
+  const establishRealtimeConnection = async (targetDocId: string) => {
+    if (!isBrowser) return;
+    if (!targetDocId) return;
+
+    desiredRealtimeDocId = targetDocId;
+    teardownRealtimeConnection();
+    realtimeStatus = 'connecting';
+
+    try {
+      const token = await getSessionToken();
+      const url = resolveRealtimeUrl(targetDocId, token);
+      const socket = new WebSocket(url);
+      realtimeSocket = socket;
+      realtimeDocId = targetDocId;
+      attachRealtimeListeners(socket);
+    } catch (error) {
+      realtimeStatus = 'error';
+      realtimeError = error instanceof Error ? error.message : String(error);
+      saveError = realtimeError;
+    }
+  };
+
+  const ensureRealtimeSession = async () => {
+    if (!isBrowser) return;
+    if (!docId) return;
+    if (
+      realtimeSocket &&
+      realtimeDocId === docId &&
+      realtimeSocket.readyState === WebSocket.OPEN
+    ) {
+      desiredRealtimeDocId = docId;
+      return;
+    }
+    await establishRealtimeConnection(docId);
+  };
+
   const fetchDocumentIndex = async (): Promise<DocumentIndexEntry[] | null> => {
     isIndexLoading = true;
     indexError = null;
@@ -501,62 +871,15 @@
         editor.innerHTML = DEFAULT_BODY;
       }
     }
-  };
 
-  const saveDocument = async (force = false) => {
-    if (!docId || !editor) return;
-    if (!isDirty && !force) return;
-
-    const content = serializeDocument();
-    const title = resolveTitleText(titleElement?.textContent ?? '') || DEFAULT_TITLE;
-
-    isSaving = true;
-    saveError = null;
-
-    const response = await apiRequest(`/docs/${docId}`, {
-      method: 'POST',
-      body: JSON.stringify({
-        title,
-        content,
-      }),
-    });
-
-    if (!response.ok) {
-      const message = await response.text();
-      saveError = message || `Save failed (${response.status})`;
-    } else {
-      const payload = (await response.json()) as DocumentResponse;
-      lastSavedAt = payload.document.updatedAt;
-      isDirty = false;
-      updateDocumentIndexEntry(toDocumentMetadata(payload.document));
-    }
-
-    isSaving = false;
-  };
-
-  const scheduleSave = (immediate = false) => {
-    if (pendingSave) {
-      clearTimeout(pendingSave);
-      pendingSave = null;
-    }
-
-    if (!docId) return;
-
-    pendingSave = setTimeout(() => {
-      pendingSave = null;
-      void saveDocument(immediate);
-    }, immediate ? 0 : SAVE_DEBOUNCE_MS);
-  };
-
-  const flushPendingSave = async () => {
-    if (pendingSave) {
-      clearTimeout(pendingSave);
-      pendingSave = null;
-      await saveDocument(true);
-    } else {
-      await saveDocument(true);
+    if (docId) {
+      pendingRealtimePayload = null;
+      pendingAckIds.clear();
+      desiredRealtimeDocId = docId;
+      await ensureRealtimeSession();
     }
   };
+
 
   const updateCurrentDocumentTitle = (value: string) => {
     if (!docId) return;
@@ -584,16 +907,16 @@
     const raw = titleElement?.textContent ?? '';
     updateCurrentDocumentTitle(raw);
     isDirty = true;
-    scheduleSave(false);
+    queueRealtimeUpdate();
   };
 
   const handleInput = () => {
     isDirty = true;
-    scheduleSave(false);
+    queueRealtimeUpdate();
   };
 
   const handleBlur = () => {
-    scheduleSave(true);
+    queueRealtimeUpdate({ immediate: true });
   };
 
   const handleTitleBlur = () => {
@@ -601,7 +924,7 @@
       titleElement.textContent = DEFAULT_UNTITLED;
     }
     updateCurrentDocumentTitle(titleElement?.textContent ?? DEFAULT_UNTITLED);
-    handleBlur();
+    queueRealtimeUpdate({ immediate: true });
   };
 
   const handleMobileMenuPopState = () => {
@@ -677,14 +1000,23 @@
       return;
     }
 
-    await flushPendingSave();
+    const previousDocId = docId;
+    desiredRealtimeDocId = candidateId;
+    await flushRealtimeUpdates();
+    teardownRealtimeConnection();
 
     const loaded = await loadExistingDocument(candidateId);
     if (loaded) {
       if (storageKey && isBrowser) {
         window.localStorage.setItem(storageKey, candidateId);
       }
+      pendingRealtimePayload = null;
+      pendingAckIds.clear();
+      await ensureRealtimeSession();
       closeMobileMenu();
+    } else if (previousDocId) {
+      desiredRealtimeDocId = previousDocId;
+      await ensureRealtimeSession();
     }
   };
 
@@ -785,7 +1117,7 @@
   const handleCreateNewDocument = async () => {
     if (!storageKey) return;
 
-    await flushPendingSave();
+    await flushRealtimeUpdates();
 
     try {
       indexError = null;
@@ -810,6 +1142,8 @@
       lastSavedAt = payload.document.updatedAt;
       saveError = null;
       isDirty = false;
+      pendingRealtimePayload = null;
+      pendingAckIds.clear();
       updateDocumentIndexEntry(toDocumentMetadata(payload.document), {
         insertAtStart: true,
       });
@@ -825,6 +1159,7 @@
         window.localStorage.setItem(storageKey, payload.document.docId);
       }
 
+      await ensureRealtimeSession();
       focusTitleAtEnd();
       closeMobileMenu();
     } catch (error) {
@@ -858,7 +1193,8 @@
         window.removeEventListener('popstate', handleMobileMenuPopState);
       }
     }
-    void flushPendingSave();
+    void flushRealtimeUpdates();
+    teardownRealtimeConnection(true);
   });
 
   $effect(() => {
@@ -993,19 +1329,11 @@
           {@html DEFAULT_BODY}
         </div>
 
-        <div class="mt-6 text-sm leading-heading" role="status" aria-live="polite">
+        <div class="mt-6 text-sm leading-heading" aria-live="polite">
           {#if saveError}
             <span class="inline-flex items-center gap-1 text-editor-error">
               We hit a snag saving: {saveError}
             </span>
-          {:else if isSaving}
-            <span class="inline-flex items-center gap-1 text-editor-busy">Saving…</span>
-          {:else if lastSavedAt}
-            <span class="inline-flex items-center gap-1 text-editor-ok">
-              Saved at {formatTimestamp(lastSavedAt)}
-            </span>
-          {:else}
-            <span class="inline-flex items-center gap-1 text-editor-busy">All changes saved.</span>
           {/if}
         </div>
       </section>
@@ -1084,5 +1412,82 @@
 
   <div class="fixed right-6 top-6 z-20">
     <UserButton afterSignOutUrl="#/sign-in" />
+  </div>
+
+  <div class="pointer-events-none fixed bottom-6 right-6 z-20 flex flex-col items-end gap-2">
+    <div
+      class={`flex h-12 w-12 items-center justify-center rounded-full shadow-lg ${realtimeIndicatorClass}`}
+      role="status"
+      aria-live="polite"
+      aria-label={realtimeStatusLabel}
+    >
+      {#if realtimeStatus === 'connected'}
+        <svg
+          class="h-6 w-6 text-white"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path
+            d="M5 13.5 9.5 18 19 7"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            fill="none"
+          />
+        </svg>
+      {:else if realtimeStatus === 'connecting'}
+        <svg
+          class="h-6 w-6 animate-spin text-white"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle
+            class="opacity-30"
+            cx="12"
+            cy="12"
+            r="9"
+            stroke="currentColor"
+            stroke-width="2"
+            fill="none"
+          />
+          <path
+            d="M21 12a9 9 0 0 0-9-9"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            fill="none"
+          />
+        </svg>
+      {:else if realtimeStatus === 'error'}
+        <svg class="h-6 w-6 text-white" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M12 8v5m0 4h.01M4.5 19h15l-7.5-14-7.5 14Z"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            fill="none"
+          />
+        </svg>
+      {:else}
+        <svg class="h-6 w-6 text-white" viewBox="0 0 24 24" aria-hidden="true">
+          <circle
+            cx="12"
+            cy="12"
+            r="2"
+            fill="currentColor"
+          />
+        </svg>
+      {/if}
+    </div>
+
+    {#if realtimeError}
+      <p class="pointer-events-auto w-56 text-right text-sm text-editor-error">
+        {realtimeError}
+      </p>
+    {/if}
   </div>
 </div>

@@ -91,10 +91,16 @@ const authenticateRequest = async (
   env: Env
 ): Promise<{ userId: string } | Response> => {
   const authHeader = request.headers.get('Authorization');
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  let token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+  if (!token && request.headers.get('Upgrade') === 'websocket') {
+    const url = new URL(request.url);
+    const queryToken = url.searchParams.get('auth');
+    token = queryToken ?? null;
+  }
 
   if (!token) {
-    return unauthorized(request, env, 'Missing bearer token');
+    return unauthorized(request, env, 'Missing authentication token');
   }
 
   if (!env.CLERK_SECRET_KEY) {
@@ -151,6 +157,23 @@ export default {
     const { userId } = auth;
     const url = new URL(request.url);
     const { pathname } = url;
+    const upgradeHeader = request.headers.get('Upgrade');
+
+    if (upgradeHeader === 'websocket') {
+      const syncMatch = pathname.match(/^\/docs\/([a-zA-Z0-9-]+)\/sync$/);
+      if (syncMatch) {
+        const docId = syncMatch[1];
+        const docStub = env.DocumentDO.get(env.DocumentDO.idFromName(docId));
+        const doRequest = new Request(`https://do/documents/${docId}/sync`, {
+          method: 'GET',
+          headers: {
+            'X-User-Id': userId,
+            Upgrade: 'websocket',
+          },
+        });
+        return docStub.fetch(doRequest);
+      }
+    }
 
     try {
       if (pathname === '/me/docs') {
@@ -321,6 +344,17 @@ export class UserIndexDO {
       return this.updateDoc(userId, docId, body);
     }
 
+    if (request.method === 'POST' && url.pathname === '/user/index/sync') {
+      const body = await parseJson<JsonValue>(request);
+      if (!body) {
+        return new Response(JSON.stringify({ error: 'Invalid JSON payload' }), {
+          status: 400,
+          headers: JSON_HEADERS,
+        });
+      }
+      return this.syncIndexFromDocument(userId, body);
+    }
+
     return new Response(JSON.stringify({ error: 'Not found' }), {
       status: 404,
       headers: JSON_HEADERS,
@@ -449,6 +483,38 @@ export class UserIndexDO {
 
     await this.state.storage.put('index', entries);
   }
+
+  private async syncIndexFromDocument(
+    userId: string,
+    payload: JsonValue
+  ): Promise<Response> {
+    const incomingOwner = payload.ownerId as string | undefined;
+    if (!incomingOwner || incomingOwner !== userId) {
+      return new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: JSON_HEADERS,
+      });
+    }
+
+    try {
+      await this.upsertIndex(payload as DocumentRecord);
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: JSON_HEADERS,
+      });
+    } catch (error) {
+      return new Response(
+        JSON.stringify({
+          error: 'Failed to sync index entry',
+          details: error instanceof Error ? error.message : String(error),
+        }),
+        {
+          status: 500,
+          headers: JSON_HEADERS,
+        }
+      );
+    }
+  }
 }
 
 /**
@@ -456,9 +522,17 @@ export class UserIndexDO {
  */
 export class DocumentDO {
   private state: DurableObjectState;
+  private env: Env;
+  private document: DocumentRecord | null = null;
+  private dirty = false;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistPromise: Promise<void> | null = null;
+  private connections = new Map<WebSocket, { userId: string }>();
+  private static readonly PERSIST_DELAY_MS = 1000;
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: Env) {
     this.state = state;
+    this.env = env;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -471,6 +545,10 @@ export class DocumentDO {
     }
 
     const url = new URL(request.url);
+    if (request.headers.get('Upgrade') === 'websocket' && url.pathname.endsWith('/sync')) {
+      return this.handleRealtimeSync(userId);
+    }
+
     if (!url.pathname.startsWith('/documents/')) {
       return new Response(JSON.stringify({ error: 'Not found' }), {
         status: 404,
@@ -500,8 +578,124 @@ export class DocumentDO {
     });
   }
 
+  private async handleRealtimeSync(userId: string): Promise<Response> {
+    const record = await this.ensureDocumentLoaded();
+    if (!record) {
+      return new Response(JSON.stringify({ error: 'Document does not exist' }), {
+        status: 404,
+        headers: JSON_HEADERS,
+      });
+    }
+
+    if (record.ownerId !== userId) {
+      return new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: JSON_HEADERS,
+      });
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.state.acceptWebSocket(server);
+    this.connections.set(server, { userId });
+    server.send(
+      JSON.stringify({
+        type: 'snapshot',
+        document: record,
+      })
+    );
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const session = this.connections.get(ws);
+    if (!session) {
+      ws.close(1011, 'Unknown session');
+      return;
+    }
+
+    const text =
+      typeof message === 'string'
+        ? message
+        : new TextDecoder().decode(message as ArrayBuffer);
+
+    let payload: JsonValue & { type?: string };
+    try {
+      payload = JSON.parse(text) as JsonValue & { type?: string };
+    } catch {
+      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON payload' }));
+      return;
+    }
+
+    if (payload.type === 'ping') {
+      ws.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }));
+      return;
+    }
+
+    if (payload.type === 'update') {
+      await this.handleRealtimeUpdate(ws, payload, session.userId);
+      return;
+    }
+
+    ws.send(JSON.stringify({ type: 'error', message: 'Unsupported message type' }));
+  }
+
+  async webSocketClose(ws: WebSocket): Promise<void> {
+    this.connections.delete(ws);
+    if (this.connections.size === 0) {
+      await this.persistNow(true);
+    }
+  }
+
+  async webSocketError(_ws: WebSocket, error: Error): Promise<void> {
+    console.error('Realtime socket error', error);
+  }
+
+  private async handleRealtimeUpdate(
+    ws: WebSocket,
+    payload: JsonValue,
+    userId: string
+  ): Promise<void> {
+    const record = await this.ensureDocumentLoaded();
+    if (!record) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Document not initialized' }));
+      return;
+    }
+
+    if (record.ownerId !== userId) {
+      ws.close(4403, 'Forbidden');
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const nextRecord: DocumentRecord = {
+      ...record,
+      title: (payload.title as string | undefined) ?? record.title,
+      content: (payload.content as string | undefined) ?? record.content,
+      tags: Array.isArray(payload.tags) ? (payload.tags as string[]) : record.tags,
+      updatedAt: now,
+      version: record.version + 1,
+    };
+
+    this.document = nextRecord;
+    this.dirty = true;
+
+    const ackPayload = {
+      type: 'ack',
+      id: typeof payload.id === 'number' ? payload.id : undefined,
+      document: nextRecord,
+    };
+    ws.send(JSON.stringify(ackPayload));
+    this.broadcastToOthers(ws, { type: 'remote-update', document: nextRecord });
+    this.schedulePersist();
+  }
+
   private async readDocument(userId: string): Promise<Response> {
-    const record = (await this.state.storage.get<DocumentRecord>('document')) ?? null;
+    const record = await this.ensureDocumentLoaded();
     if (!record) {
       return new Response(JSON.stringify({ error: 'Not found' }), {
         status: 404,
@@ -528,7 +722,7 @@ export class DocumentDO {
     body: JsonValue
   ): Promise<Response> {
     const now = new Date().toISOString();
-    const existing = (await this.state.storage.get<DocumentRecord>('document')) ?? null;
+    const existing = await this.ensureDocumentLoaded();
 
     if (!existing) {
       if (!body.initialize) {
@@ -558,6 +752,8 @@ export class DocumentDO {
       };
 
       await this.state.storage.put('document', record);
+      this.document = record;
+      this.dirty = false;
 
       return new Response(JSON.stringify({ document: record }), {
         status: 201,
@@ -582,10 +778,89 @@ export class DocumentDO {
     };
 
     await this.state.storage.put('document', updated);
+    this.document = updated;
+    this.dirty = false;
 
     return new Response(JSON.stringify({ document: updated }), {
       status: 200,
       headers: JSON_HEADERS,
+    });
+  }
+
+  private async ensureDocumentLoaded(): Promise<DocumentRecord | null> {
+    if (this.document) {
+      return this.document;
+    }
+    this.document = (await this.state.storage.get<DocumentRecord>('document')) ?? null;
+    return this.document;
+  }
+
+  private broadcastToOthers(origin: WebSocket, payload: JsonValue): void {
+    const encoded = JSON.stringify(payload);
+    for (const socket of this.connections.keys()) {
+      if (socket === origin) continue;
+      try {
+        socket.send(encoded);
+      } catch (error) {
+        console.error('Failed to fan-out realtime update', error);
+      }
+    }
+  }
+
+  private schedulePersist(): void {
+    if (this.persistTimer) {
+      return;
+    }
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.persistNow();
+    }, DocumentDO.PERSIST_DELAY_MS);
+  }
+
+  private async persistNow(force = false): Promise<void> {
+    if (!this.document) {
+      return;
+    }
+    if (!force && !this.dirty) {
+      return;
+    }
+
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+
+    if (this.persistPromise) {
+      await this.persistPromise;
+      if (force || this.dirty) {
+        await this.persistNow(force);
+      }
+      return;
+    }
+
+    this.persistPromise = (async () => {
+      try {
+        await this.state.storage.put('document', this.document);
+        await this.syncIndex(this.document!);
+        this.dirty = false;
+      } finally {
+        this.persistPromise = null;
+      }
+    })();
+
+    await this.persistPromise;
+  }
+
+  private async syncIndex(record: DocumentRecord): Promise<void> {
+    const ownerId = record.ownerId;
+    const userStub = this.env.UserIndexDO.get(this.env.UserIndexDO.idFromName(ownerId));
+    await userStub.fetch('https://do/user/index/sync', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-User-Id': ownerId,
+      },
+      body: JSON.stringify(record),
     });
   }
 }
