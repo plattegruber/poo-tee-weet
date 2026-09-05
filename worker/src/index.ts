@@ -76,29 +76,20 @@ const ensureDocumentTags = (value: unknown): string[] => {
   return normalized ?? [];
 };
 
-const aggregateTags = (entries: DocumentMetadata[]): string[] => {
-  const seen = new Map<string, string>();
-  for (const entry of entries) {
-    for (const tag of entry.tags ?? []) {
-      const sanitized = sanitizeTagValue(tag);
-      if (!sanitized) {
-        continue;
-      }
-      const key = sanitized.toLowerCase();
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.set(key, sanitized);
-    }
-  }
-  return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
-};
-
 type JsonValue = Record<string, unknown>;
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
 } as const;
+
+const MAX_CONTENT_LENGTH = 1_000_000;
+const TOO_LARGE_MESSAGE = 'Document too large (limit 1 MB)';
+
+const json = (status: number, body: unknown): Response =>
+  new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+
+const asString = (value: unknown, fallback: string): string =>
+  typeof value === 'string' ? value : fallback;
 
 const corsHeaders = (request: Request, env: Env, baseHeaders: HeadersInit = {}): Headers => {
   const headers = new Headers(baseHeaders);
@@ -202,23 +193,23 @@ export default {
     const { pathname } = url;
     const upgradeHeader = request.headers.get('Upgrade');
 
-    if (upgradeHeader === 'websocket') {
-      const syncMatch = pathname.match(/^\/docs\/([a-zA-Z0-9-]+)\/sync$/);
-      if (syncMatch) {
-        const docId = syncMatch[1];
-        const docStub = env.DocumentDO.get(env.DocumentDO.idFromName(docId));
-        const doRequest = new Request(`https://do/documents/${docId}/sync`, {
-          method: 'GET',
-          headers: {
-            'X-User-Id': userId,
-            Upgrade: 'websocket',
-          },
-        });
-        return docStub.fetch(doRequest);
-      }
-    }
-
     try {
+      if (upgradeHeader === 'websocket') {
+        const syncMatch = pathname.match(/^\/docs\/([a-zA-Z0-9-]+)\/sync$/);
+        if (syncMatch) {
+          const docId = syncMatch[1];
+          const docStub = env.DocumentDO.get(env.DocumentDO.idFromName(docId));
+          const doRequest = new Request(`https://do/documents/${docId}/sync`, {
+            method: 'GET',
+            headers: {
+              'X-User-Id': userId,
+              Upgrade: 'websocket',
+            },
+          });
+          return docStub.fetch(doRequest);
+        }
+      }
+
       if (pathname === '/me/docs') {
         if (request.method === 'GET') {
           return this.listDocuments(request, env, userId);
@@ -360,10 +351,7 @@ export class UserIndexDO {
   async fetch(request: Request): Promise<Response> {
     const userId = request.headers.get('X-User-Id');
     if (!userId) {
-      return new Response(JSON.stringify({ error: 'Missing user id header' }), {
-        status: 401,
-        headers: JSON_HEADERS,
-      });
+      return json(401, { error: 'Missing user id header' });
     }
 
     const mismatchResponse = await this.ensureUserId(userId);
@@ -379,10 +367,7 @@ export class UserIndexDO {
     if (request.method === 'POST' && url.pathname === '/user/docs') {
       const body = await parseJson<JsonValue>(request);
       if (!body) {
-        return new Response(JSON.stringify({ error: 'Invalid JSON payload' }), {
-          status: 400,
-          headers: JSON_HEADERS,
-        });
+        return json(400, { error: 'Invalid JSON payload' });
       }
       return this.createDoc(userId, body);
     }
@@ -392,10 +377,7 @@ export class UserIndexDO {
       const docId = match[1];
       const body = await parseJson<JsonValue>(request);
       if (!body) {
-        return new Response(JSON.stringify({ error: 'Invalid JSON payload' }), {
-          status: 400,
-          headers: JSON_HEADERS,
-        });
+        return json(400, { error: 'Invalid JSON payload' });
       }
       return this.updateDoc(userId, docId, body);
     }
@@ -407,39 +389,23 @@ export class UserIndexDO {
     if (request.method === 'POST' && url.pathname === '/user/index/sync') {
       const body = await parseJson<JsonValue>(request);
       if (!body) {
-        return new Response(JSON.stringify({ error: 'Invalid JSON payload' }), {
-          status: 400,
-          headers: JSON_HEADERS,
-        });
+        return json(400, { error: 'Invalid JSON payload' });
       }
       return this.syncIndexFromDocument(userId, body);
     }
 
-    return new Response(JSON.stringify({ error: 'Not found' }), {
-      status: 404,
-      headers: JSON_HEADERS,
-    });
+    return json(404, { error: 'Not found' });
   }
 
   private async ensureUserId(userId: string): Promise<Response | null> {
     if (this.initializedUserId) {
-      return this.initializedUserId === userId
-        ? null
-        : new Response(JSON.stringify({ error: 'Forbidden' }), {
-            status: 403,
-            headers: JSON_HEADERS,
-          });
+      return this.initializedUserId === userId ? null : json(403, { error: 'Forbidden' });
     }
 
     const stored = (await this.state.storage.get<string>('userId')) ?? null;
     if (stored) {
       this.initializedUserId = stored;
-      return stored === userId
-        ? null
-        : new Response(JSON.stringify({ error: 'Forbidden' }), {
-            status: 403,
-            headers: JSON_HEADERS,
-          });
+      return stored === userId ? null : json(403, { error: 'Forbidden' });
     }
 
     await this.state.storage.put('userId', userId);
@@ -452,25 +418,14 @@ export class UserIndexDO {
     const list = Object.values(entries).sort((a, b) => {
       return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
     });
-    const allTags = aggregateTags(list);
-
-    return new Response(
-      JSON.stringify({
-        documents: list,
-        tags: allTags,
-      }),
-      {
-        status: 200,
-        headers: JSON_HEADERS,
-      }
-    );
+    return json(200, { documents: list });
   }
 
   private async createDoc(userId: string, body: JsonValue): Promise<Response> {
     const docId = crypto.randomUUID();
     const payload = {
-      title: (body.title as string | undefined) ?? '',
-      content: (body.content as string | undefined) ?? '',
+      title: asString(body.title, ''),
+      content: asString(body.content, ''),
       tags: ensureDocumentTags(body.tags),
     };
 
@@ -495,10 +450,7 @@ export class UserIndexDO {
     const record = (await createResponse.json()) as { document: DocumentRecord };
     await this.upsertIndex(record.document);
 
-    return new Response(JSON.stringify(record), {
-      status: 201,
-      headers: JSON_HEADERS,
-    });
+    return json(201, record);
   }
 
   private async updateDoc(userId: string, docId: string, body: JsonValue): Promise<Response> {
@@ -519,10 +471,7 @@ export class UserIndexDO {
     const record = (await updateResponse.json()) as { document: DocumentRecord };
     await this.upsertIndex(record.document);
 
-    return new Response(JSON.stringify(record), {
-      status: 200,
-      headers: JSON_HEADERS,
-    });
+    return json(200, record);
   }
 
   private async deleteDoc(userId: string, docId: string): Promise<Response> {
@@ -559,29 +508,17 @@ export class UserIndexDO {
   private async syncIndexFromDocument(userId: string, payload: JsonValue): Promise<Response> {
     const incomingOwner = payload.ownerId as string | undefined;
     if (!incomingOwner || incomingOwner !== userId) {
-      return new Response(JSON.stringify({ error: 'Forbidden' }), {
-        status: 403,
-        headers: JSON_HEADERS,
-      });
+      return json(403, { error: 'Forbidden' });
     }
 
     try {
       await this.upsertIndex(payload as unknown as DocumentRecord);
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: JSON_HEADERS,
-      });
+      return json(200, { ok: true });
     } catch (error) {
-      return new Response(
-        JSON.stringify({
-          error: 'Failed to sync index entry',
-          details: error instanceof Error ? error.message : String(error),
-        }),
-        {
-          status: 500,
-          headers: JSON_HEADERS,
-        }
-      );
+      return json(500, {
+        error: 'Failed to sync index entry',
+        details: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }
@@ -604,10 +541,7 @@ export class DocumentDO {
   async fetch(request: Request): Promise<Response> {
     const userId = request.headers.get('X-User-Id');
     if (!userId) {
-      return new Response(JSON.stringify({ error: 'Missing user id header' }), {
-        status: 401,
-        headers: JSON_HEADERS,
-      });
+      return json(401, { error: 'Missing user id header' });
     }
 
     const url = new URL(request.url);
@@ -616,10 +550,7 @@ export class DocumentDO {
     }
 
     if (!url.pathname.startsWith('/documents/')) {
-      return new Response(JSON.stringify({ error: 'Not found' }), {
-        status: 404,
-        headers: JSON_HEADERS,
-      });
+      return json(404, { error: 'Not found' });
     }
 
     const docId = url.pathname.split('/')[2];
@@ -630,10 +561,7 @@ export class DocumentDO {
     if (request.method === 'POST') {
       const body = await parseJson<JsonValue>(request);
       if (!body) {
-        return new Response(JSON.stringify({ error: 'Invalid JSON payload' }), {
-          status: 400,
-          headers: JSON_HEADERS,
-        });
+        return json(400, { error: 'Invalid JSON payload' });
       }
       return this.writeDocument(userId, docId, body);
     }
@@ -642,26 +570,17 @@ export class DocumentDO {
       return this.deleteDocument(userId);
     }
 
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-      status: 405,
-      headers: JSON_HEADERS,
-    });
+    return json(405, { error: 'Method not allowed' });
   }
 
   private async handleRealtimeSync(userId: string): Promise<Response> {
     const record = await this.ensureDocumentLoaded();
     if (!record) {
-      return new Response(JSON.stringify({ error: 'Document does not exist' }), {
-        status: 404,
-        headers: JSON_HEADERS,
-      });
+      return json(404, { error: 'Document does not exist' });
     }
 
     if (record.ownerId !== userId) {
-      return new Response(JSON.stringify({ error: 'Forbidden' }), {
-        status: 403,
-        headers: JSON_HEADERS,
-      });
+      return json(403, { error: 'Forbidden' });
     }
 
     const pair = new WebSocketPair();
@@ -737,12 +656,16 @@ export class DocumentDO {
     const incomingTags = normalizeTagsInput(payload.tags);
     const nextRecord: DocumentRecord = {
       ...record,
-      title: (payload.title as string | undefined) ?? record.title,
-      content: (payload.content as string | undefined) ?? record.content,
+      title: asString(payload.title, record.title),
+      content: asString(payload.content, record.content),
       tags: incomingTags ?? record.tags,
       updatedAt: new Date().toISOString(),
       version: record.version + 1,
     };
+    if (nextRecord.content.length > MAX_CONTENT_LENGTH) {
+      ws.send(JSON.stringify({ type: 'error', message: TOO_LARGE_MESSAGE }));
+      return;
+    }
 
     this.document = nextRecord;
     await this.state.storage.put('document', nextRecord);
@@ -767,23 +690,14 @@ export class DocumentDO {
   private async readDocument(userId: string): Promise<Response> {
     const record = await this.ensureDocumentLoaded();
     if (!record) {
-      return new Response(JSON.stringify({ error: 'Not found' }), {
-        status: 404,
-        headers: JSON_HEADERS,
-      });
+      return json(404, { error: 'Not found' });
     }
 
     if (record.ownerId !== userId) {
-      return new Response(JSON.stringify({ error: 'Forbidden' }), {
-        status: 403,
-        headers: JSON_HEADERS,
-      });
+      return json(403, { error: 'Forbidden' });
     }
 
-    return new Response(JSON.stringify({ document: record }), {
-      status: 200,
-      headers: JSON_HEADERS,
-    });
+    return json(200, { document: record });
   }
 
   private async writeDocument(userId: string, docId: string, body: JsonValue): Promise<Response> {
@@ -792,80 +706,65 @@ export class DocumentDO {
 
     if (!existing) {
       if (!body.initialize) {
-        return new Response(JSON.stringify({ error: 'Document does not exist' }), {
-          status: 404,
-          headers: JSON_HEADERS,
-        });
+        return json(404, { error: 'Document does not exist' });
       }
 
       const ownerId = (body.ownerId as string | undefined) ?? userId;
       if (ownerId !== userId) {
-        return new Response(JSON.stringify({ error: 'Forbidden' }), {
-          status: 403,
-          headers: JSON_HEADERS,
-        });
+        return json(403, { error: 'Forbidden' });
       }
 
       const record: DocumentRecord = {
         docId,
         ownerId,
-        title: (body.title as string | undefined) ?? '',
-        content: (body.content as string | undefined) ?? '',
+        title: asString(body.title, ''),
+        content: asString(body.content, ''),
         tags: ensureDocumentTags(body.tags),
         createdAt: now,
         updatedAt: now,
         version: 1,
       };
 
+      if (record.content.length > MAX_CONTENT_LENGTH) {
+        return json(413, { error: TOO_LARGE_MESSAGE });
+      }
       await this.state.storage.put('document', record);
       this.document = record;
 
-      return new Response(JSON.stringify({ document: record }), {
-        status: 201,
-        headers: JSON_HEADERS,
-      });
+      return json(201, { document: record });
     }
 
     if (existing.ownerId !== userId) {
-      return new Response(JSON.stringify({ error: 'Forbidden' }), {
-        status: 403,
-        headers: JSON_HEADERS,
-      });
+      return json(403, { error: 'Forbidden' });
     }
 
     const incomingTags = normalizeTagsInput(body.tags);
     const updated: DocumentRecord = {
       ...existing,
-      title: (body.title as string | undefined) ?? existing.title,
-      content: (body.content as string | undefined) ?? existing.content,
+      title: asString(body.title, existing.title),
+      content: asString(body.content, existing.content),
       tags: incomingTags ?? existing.tags,
       updatedAt: now,
       version: existing.version + 1,
     };
 
+    if (updated.content.length > MAX_CONTENT_LENGTH) {
+      return json(413, { error: TOO_LARGE_MESSAGE });
+    }
     await this.state.storage.put('document', updated);
     this.document = updated;
 
-    return new Response(JSON.stringify({ document: updated }), {
-      status: 200,
-      headers: JSON_HEADERS,
-    });
+    return json(200, { document: updated });
   }
 
   private async deleteDocument(userId: string): Promise<Response> {
     const record = await this.ensureDocumentLoaded();
     if (!record) {
-      return new Response(JSON.stringify({ error: 'Not found' }), {
-        status: 404,
-        headers: JSON_HEADERS,
-      });
+      return json(404, { error: 'Not found' });
     }
 
     if (record.ownerId !== userId) {
-      return new Response(JSON.stringify({ error: 'Forbidden' }), {
-        status: 403,
-        headers: JSON_HEADERS,
-      });
+      return json(403, { error: 'Forbidden' });
     }
 
     for (const socket of this.state.getWebSockets()) {
