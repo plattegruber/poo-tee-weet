@@ -6,13 +6,11 @@
 
 import { verifyToken } from '@clerk/backend';
 
-const JWT_TEMPLATE = 'poo-tee-weet';
-
 interface Env {
   CLERK_SECRET_KEY: string;
   ALLOWED_ORIGINS?: string;
-  DocumentDO: DurableObjectNamespace<DocumentDO>;
-  UserIndexDO: DurableObjectNamespace<UserIndexDO>;
+  DocumentDO: DurableObjectNamespace;
+  UserIndexDO: DurableObjectNamespace;
 }
 
 interface DocumentRecord {
@@ -102,36 +100,24 @@ const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
 } as const;
 
-const corsHeaders = (
-  request: Request,
-  env: Env,
-  baseHeaders: HeadersInit = {}
-): Headers => {
+const corsHeaders = (request: Request, env: Env, baseHeaders: HeadersInit = {}): Headers => {
   const headers = new Headers(baseHeaders);
-  const requestOrigin = request.headers.get('Origin');
-  const configuredOrigins = env.ALLOWED_ORIGINS?.split(',').map((origin) => origin.trim());
-  const allowOrigin =
-    configuredOrigins && configuredOrigins.length > 0
-      ? configuredOrigins.includes('*')
-        ? '*'
-        : configuredOrigins.includes(requestOrigin ?? '')
-        ? requestOrigin
-        : configuredOrigins[0]
-      : requestOrigin ?? '*';
-  headers.set('Access-Control-Allow-Origin', allowOrigin ?? '*');
-  headers.set('Access-Control-Allow-Headers', 'authorization,content-type');
-  headers.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  headers.set('Access-Control-Allow-Credentials', 'true');
+  const origin = request.headers.get('Origin') ?? '';
+  const allowed = (env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (allowed.includes('*') || (origin && allowed.includes(origin))) {
+    headers.set('Access-Control-Allow-Origin', allowed.includes('*') ? '*' : origin);
+    headers.set('Access-Control-Allow-Headers', 'authorization,content-type');
+    headers.set('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    headers.set('Access-Control-Max-Age', '86400');
+  }
   headers.append('Vary', 'Origin');
   return headers;
 };
 
-const jsonResponse = (
-  request: Request,
-  env: Env,
-  status: number,
-  body: JsonValue
-): Response => {
+const jsonResponse = (request: Request, env: Env, status: number, body: JsonValue): Response => {
   return new Response(JSON.stringify(body), {
     status,
     headers: corsHeaders(request, env, JSON_HEADERS),
@@ -171,15 +157,13 @@ const authenticateRequest = async (
   try {
     const jwtPayload = await verifyToken(token, {
       secretKey: env.CLERK_SECRET_KEY,
-      template: JWT_TEMPLATE,
     });
 
     const resolvedUserId =
       (jwtPayload?.userId as string | undefined) ??
       (jwtPayload?.sub as string | undefined) ??
-      ((jwtPayload as Record<string, unknown> | undefined)?.[
-        'https://clerk.dev/user_id'
-      ] as string | undefined);
+      ((jwtPayload as Record<string, unknown> | undefined)?.['https://clerk.dev/user_id'] as
+        string | undefined);
 
     if (!resolvedUserId) {
       return jsonResponse(request, env, 401, { error: 'Failed to determine Clerk user id' });
@@ -194,9 +178,7 @@ const authenticateRequest = async (
   }
 };
 
-const parseJson = async <T extends JsonValue>(
-  request: Request
-): Promise<T | null> => {
+const parseJson = async <T extends JsonValue>(request: Request): Promise<T | null> => {
   try {
     return (await request.json()) as T;
   } catch {
@@ -258,6 +240,10 @@ export default {
         if (request.method === 'POST') {
           return this.updateDocument(request, env, userId, docId);
         }
+
+        if (request.method === 'DELETE') {
+          return this.deleteDocument(request, env, userId, docId);
+        }
       }
 
       return jsonResponse(request, env, 404, { error: 'Not found' });
@@ -301,12 +287,7 @@ export default {
     return this.forwardDoResponse(response, request, env);
   },
 
-  async readDocument(
-    request: Request,
-    env: Env,
-    userId: string,
-    docId: string
-  ): Promise<Response> {
+  async readDocument(request: Request, env: Env, userId: string, docId: string): Promise<Response> {
     const docStub = env.DocumentDO.get(env.DocumentDO.idFromName(docId));
     const response = await docStub.fetch(`https://do/documents/${docId}`, {
       method: 'GET',
@@ -336,6 +317,20 @@ export default {
         'content-type': 'application/json',
       },
       body: JSON.stringify(payload),
+    });
+    return this.forwardDoResponse(response, request, env);
+  },
+
+  async deleteDocument(
+    request: Request,
+    env: Env,
+    userId: string,
+    docId: string
+  ): Promise<Response> {
+    const userStub = env.UserIndexDO.get(env.UserIndexDO.idFromName(userId));
+    const response = await userStub.fetch(`https://do/user/docs/${docId}`, {
+      method: 'DELETE',
+      headers: { 'X-User-Id': userId },
     });
     return this.forwardDoResponse(response, request, env);
   },
@@ -405,6 +400,10 @@ export class UserIndexDO {
       return this.updateDoc(userId, docId, body);
     }
 
+    if (request.method === 'DELETE' && match) {
+      return this.deleteDoc(userId, match[1]);
+    }
+
     if (request.method === 'POST' && url.pathname === '/user/index/sync') {
       const body = await parseJson<JsonValue>(request);
       if (!body) {
@@ -449,8 +448,7 @@ export class UserIndexDO {
   }
 
   private async listDocs(): Promise<Response> {
-    const entries =
-      (await this.state.storage.get<Record<string, DocumentMetadata>>('index')) ?? {};
+    const entries = (await this.state.storage.get<Record<string, DocumentMetadata>>('index')) ?? {};
     const list = Object.values(entries).sort((a, b) => {
       return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
     });
@@ -503,11 +501,7 @@ export class UserIndexDO {
     });
   }
 
-  private async updateDoc(
-    userId: string,
-    docId: string,
-    body: JsonValue
-  ): Promise<Response> {
+  private async updateDoc(userId: string, docId: string, body: JsonValue): Promise<Response> {
     const docStub = this.env.DocumentDO.get(this.env.DocumentDO.idFromName(docId));
     const updateResponse = await docStub.fetch(`https://do/documents/${docId}`, {
       method: 'POST',
@@ -531,9 +525,24 @@ export class UserIndexDO {
     });
   }
 
+  private async deleteDoc(userId: string, docId: string): Promise<Response> {
+    const docStub = this.env.DocumentDO.get(this.env.DocumentDO.idFromName(docId));
+    const deleteResponse = await docStub.fetch(`https://do/documents/${docId}`, {
+      method: 'DELETE',
+      headers: { 'X-User-Id': userId },
+    });
+    if (!deleteResponse.ok && deleteResponse.status !== 404) {
+      return deleteResponse;
+    }
+
+    const entries = (await this.state.storage.get<Record<string, DocumentMetadata>>('index')) ?? {};
+    delete entries[docId];
+    await this.state.storage.put('index', entries);
+    return new Response(null, { status: 204 });
+  }
+
   private async upsertIndex(document: DocumentRecord): Promise<void> {
-    const entries =
-      (await this.state.storage.get<Record<string, DocumentMetadata>>('index')) ?? {};
+    const entries = (await this.state.storage.get<Record<string, DocumentMetadata>>('index')) ?? {};
 
     entries[document.docId] = {
       docId: document.docId,
@@ -547,10 +556,7 @@ export class UserIndexDO {
     await this.state.storage.put('index', entries);
   }
 
-  private async syncIndexFromDocument(
-    userId: string,
-    payload: JsonValue
-  ): Promise<Response> {
+  private async syncIndexFromDocument(userId: string, payload: JsonValue): Promise<Response> {
     const incomingOwner = payload.ownerId as string | undefined;
     if (!incomingOwner || incomingOwner !== userId) {
       return new Response(JSON.stringify({ error: 'Forbidden' }), {
@@ -560,7 +566,7 @@ export class UserIndexDO {
     }
 
     try {
-      await this.upsertIndex(payload as DocumentRecord);
+      await this.upsertIndex(payload as unknown as DocumentRecord);
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: JSON_HEADERS,
@@ -582,14 +588,13 @@ export class UserIndexDO {
 
 /**
  * Durable Object storing canonical document content.
+ * WebSockets use the hibernation API: per-socket state lives in the socket
+ * attachment (not in memory) so it survives the object being evicted.
  */
 export class DocumentDO {
   private state: DurableObjectState;
   private env: Env;
   private document: DocumentRecord | null = null;
-  private dirty = false;
-  private persistPromise: Promise<void> | null = null;
-  private connections = new Map<WebSocket, { userId: string }>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -633,6 +638,10 @@ export class DocumentDO {
       return this.writeDocument(userId, docId, body);
     }
 
+    if (request.method === 'DELETE') {
+      return this.deleteDocument(userId);
+    }
+
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
       headers: JSON_HEADERS,
@@ -658,31 +667,21 @@ export class DocumentDO {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.state.acceptWebSocket(server);
-    this.connections.set(server, { userId });
-    server.send(
-      JSON.stringify({
-        type: 'snapshot',
-        document: record,
-      })
-    );
+    server.serializeAttachment({ userId });
+    server.send(JSON.stringify({ type: 'snapshot', document: record }));
 
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    });
+    return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const session = this.connections.get(ws);
-    if (!session) {
+    const session = ws.deserializeAttachment() as { userId?: string } | null;
+    if (!session?.userId) {
       ws.close(1011, 'Unknown session');
       return;
     }
 
     const text =
-      typeof message === 'string'
-        ? message
-        : new TextDecoder().decode(message as ArrayBuffer);
+      typeof message === 'string' ? message : new TextDecoder().decode(message as ArrayBuffer);
 
     let payload: JsonValue & { type?: string };
     try {
@@ -706,9 +705,12 @@ export class DocumentDO {
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
-    this.connections.delete(ws);
-    if (this.connections.size === 0) {
-      await this.persistNow(true);
+    // Last client gone: push updatedAt into the user's index so "most recent"
+    // ordering stays right without syncing on every keystroke.
+    if (this.openSockets(ws).length > 0) return;
+    const record = await this.ensureDocumentLoaded();
+    if (record) {
+      await this.syncIndex(record);
     }
   }
 
@@ -732,27 +734,33 @@ export class DocumentDO {
       return;
     }
 
-    const now = new Date().toISOString();
     const incomingTags = normalizeTagsInput(payload.tags);
     const nextRecord: DocumentRecord = {
       ...record,
       title: (payload.title as string | undefined) ?? record.title,
       content: (payload.content as string | undefined) ?? record.content,
       tags: incomingTags ?? record.tags,
-      updatedAt: now,
+      updatedAt: new Date().toISOString(),
       version: record.version + 1,
     };
 
     this.document = nextRecord;
-    this.dirty = true;
-    await this.persistNow();
+    await this.state.storage.put('document', nextRecord);
 
-    const ackPayload = {
-      type: 'ack',
-      id: typeof payload.id === 'number' ? payload.id : undefined,
-      document: nextRecord,
-    };
-    ws.send(JSON.stringify(ackPayload));
+    const metadataChanged =
+      nextRecord.title !== record.title ||
+      nextRecord.tags.join('\u0000') !== record.tags.join('\u0000');
+    if (metadataChanged) {
+      await this.syncIndex(nextRecord);
+    }
+
+    ws.send(
+      JSON.stringify({
+        type: 'ack',
+        id: typeof payload.id === 'number' ? payload.id : undefined,
+        document: nextRecord,
+      })
+    );
     this.broadcastToOthers(ws, { type: 'remote-update', document: nextRecord });
   }
 
@@ -778,11 +786,7 @@ export class DocumentDO {
     });
   }
 
-  private async writeDocument(
-    userId: string,
-    docId: string,
-    body: JsonValue
-  ): Promise<Response> {
+  private async writeDocument(userId: string, docId: string, body: JsonValue): Promise<Response> {
     const now = new Date().toISOString();
     const existing = await this.ensureDocumentLoaded();
 
@@ -815,7 +819,6 @@ export class DocumentDO {
 
       await this.state.storage.put('document', record);
       this.document = record;
-      this.dirty = false;
 
       return new Response(JSON.stringify({ document: record }), {
         status: 201,
@@ -842,12 +845,40 @@ export class DocumentDO {
 
     await this.state.storage.put('document', updated);
     this.document = updated;
-    this.dirty = false;
 
     return new Response(JSON.stringify({ document: updated }), {
       status: 200,
       headers: JSON_HEADERS,
     });
+  }
+
+  private async deleteDocument(userId: string): Promise<Response> {
+    const record = await this.ensureDocumentLoaded();
+    if (!record) {
+      return new Response(JSON.stringify({ error: 'Not found' }), {
+        status: 404,
+        headers: JSON_HEADERS,
+      });
+    }
+
+    if (record.ownerId !== userId) {
+      return new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: JSON_HEADERS,
+      });
+    }
+
+    for (const socket of this.state.getWebSockets()) {
+      try {
+        socket.close(4410, 'Document deleted');
+      } catch (error) {
+        console.error('Failed to close socket on delete', error);
+      }
+    }
+
+    await this.state.storage.deleteAll();
+    this.document = null;
+    return new Response(null, { status: 204 });
   }
 
   private async ensureDocumentLoaded(): Promise<DocumentRecord | null> {
@@ -856,21 +887,21 @@ export class DocumentDO {
     }
     const stored = (await this.state.storage.get<DocumentRecord>('document')) ?? null;
     if (!stored) {
-      this.document = null;
       return null;
     }
-    const normalized: DocumentRecord = {
-      ...stored,
-      tags: ensureDocumentTags(stored.tags),
-    };
-    this.document = normalized;
-    return normalized;
+    this.document = { ...stored, tags: ensureDocumentTags(stored.tags) };
+    return this.document;
+  }
+
+  private openSockets(except?: WebSocket): WebSocket[] {
+    return this.state
+      .getWebSockets()
+      .filter((socket) => socket !== except && socket.readyState === WebSocket.OPEN);
   }
 
   private broadcastToOthers(origin: WebSocket, payload: JsonValue): void {
     const encoded = JSON.stringify(payload);
-    for (const socket of this.connections.keys()) {
-      if (socket === origin) continue;
+    for (const socket of this.openSockets(origin)) {
       try {
         socket.send(encoded);
       } catch (error) {
@@ -879,43 +910,13 @@ export class DocumentDO {
     }
   }
 
-  private async persistNow(force = false): Promise<void> {
-    if (!this.document) {
-      return;
-    }
-    if (!force && !this.dirty) {
-      return;
-    }
-
-    if (this.persistPromise) {
-      await this.persistPromise;
-      if (force || this.dirty) {
-        await this.persistNow(force);
-      }
-      return;
-    }
-
-    this.persistPromise = (async () => {
-      try {
-        await this.state.storage.put('document', this.document);
-        await this.syncIndex(this.document!);
-        this.dirty = false;
-      } finally {
-        this.persistPromise = null;
-      }
-    })();
-
-    await this.persistPromise;
-  }
-
   private async syncIndex(record: DocumentRecord): Promise<void> {
-    const ownerId = record.ownerId;
-    const userStub = this.env.UserIndexDO.get(this.env.UserIndexDO.idFromName(ownerId));
+    const userStub = this.env.UserIndexDO.get(this.env.UserIndexDO.idFromName(record.ownerId));
     await userStub.fetch('https://do/user/index/sync', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'X-User-Id': ownerId,
+        'X-User-Id': record.ownerId,
       },
       body: JSON.stringify(record),
     });
