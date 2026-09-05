@@ -31,13 +31,13 @@
     setHash('signUp');
   };
 
-  const sharedProps = {
+  const sharedProps = $derived({
     routing: 'hash' as const,
     afterSignInUrl: afterAuthUrl,
     afterSignUpUrl: afterAuthUrl,
     signInUrl: signInHash,
     signUpUrl: signUpHash,
-  };
+  });
 
   onMount(() => {
     syncFromHash();

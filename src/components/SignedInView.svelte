@@ -111,6 +111,8 @@
   let mobileMenuHistoryActive = false;
   let ignoreNextPopStateClose = false;
   let touchStartX: number | null = null;
+  let deleteArmed = $state(false);
+  let deleteArmTimer: ReturnType<typeof setTimeout> | null = null;
 
   const availableTags = $derived.by(() => buildTagCloud(documents));
   const filteredDocuments = $derived.by(() =>
@@ -141,8 +143,8 @@
   let clientMessageCounter = 0;
 
   const storageKey = $derived.by(() => {
-    const sessionId = clerk.session?.id ?? null;
-    return sessionId ? `ptw-doc-${sessionId}` : null;
+    const userId = clerk.auth?.userId ?? clerk.user?.id ?? null;
+    return userId ? `ptw-doc-${userId}` : null;
   });
 
   $effect(() => {
@@ -895,6 +897,11 @@
     realtimeDocId = null;
     realtimeStatus = 'disconnected';
 
+    if (event.code === 4410) {
+      desiredRealtimeDocId = null;
+      return;
+    }
+
     if (pendingAckIds.size > 0 || pendingRealtimePayload) {
       isDirty = true;
     }
@@ -1420,6 +1427,55 @@
     }
   };
 
+  const handleDeleteDocument = async () => {
+    if (!docId) return;
+    if (!deleteArmed) {
+      deleteArmed = true;
+      deleteArmTimer = setTimeout(() => {
+        deleteArmed = false;
+      }, 4000);
+      return;
+    }
+    if (deleteArmTimer) clearTimeout(deleteArmTimer);
+    deleteArmed = false;
+
+    const target = docId;
+    teardownRealtimeConnection(true);
+    pendingRealtimePayload = null;
+    pendingAckIds.clear();
+
+    try {
+      const response = await apiRequest(`/docs/${target}`, { method: 'DELETE' });
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`Delete failed (${response.status}).`);
+      }
+    } catch (error) {
+      saveError = error instanceof Error ? error.message : String(error);
+      desiredRealtimeDocId = target;
+      await ensureRealtimeSession();
+      return;
+    }
+
+    docId = null;
+    isDirty = false;
+    saveError = null;
+    documents = documents.filter((entry) => entry.docId !== target);
+    if (storageKey && isBrowser) {
+      window.localStorage.removeItem(storageKey);
+    }
+
+    const next = documents[0];
+    if (next && (await loadExistingDocument(next.docId))) {
+      if (storageKey && isBrowser) {
+        window.localStorage.setItem(storageKey, next.docId);
+      }
+      await ensureRealtimeSession();
+      closeMobileMenu();
+      return;
+    }
+    await handleCreateNewDocument();
+  };
+
   const handleBeforeUnload = (event: BeforeUnloadEvent) => {
     if (!isDirty) return;
     event.preventDefault();
@@ -1446,6 +1502,7 @@
         window.removeEventListener('popstate', handleMobileMenuPopState);
       }
     }
+    if (deleteArmTimer) clearTimeout(deleteArmTimer);
     void flushRealtimeUpdates();
     teardownRealtimeConnection(true);
   });
@@ -1462,6 +1519,7 @@
 
 <div
   class="relative min-h-screen bg-editor-background"
+  role="presentation"
   ontouchstart={handleTouchStart}
   ontouchend={handleTouchEnd}
   ontouchcancel={handleTouchCancel}
@@ -1472,6 +1530,7 @@
   >
     <div
       class="relative hidden h-full md:block"
+      role="presentation"
       onpointerenter={handleSidebarPointerEnter}
       onpointerleave={handleSidebarPointerLeave}
     >
@@ -1571,6 +1630,19 @@
             {/each}
           </ul>
         </nav>
+
+        {#if docId}
+          <button
+            type="button"
+            class="mt-4 w-full rounded-md px-3 py-2 text-left text-sm text-editor-busy transition hover:bg-red-50 hover:text-editor-error focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+            class:bg-red-50={deleteArmed}
+            class:text-editor-error={deleteArmed}
+            onclick={handleDeleteDocument}
+            tabindex={sidebarVisible ? 0 : -1}
+          >
+            {deleteArmed ? 'Click again to delete' : 'Delete this document'}
+          </button>
+        {/if}
       </aside>
     </div>
 
@@ -1778,6 +1850,18 @@
             {/each}
           </ul>
         </nav>
+
+        {#if docId}
+          <button
+            type="button"
+            class="mt-4 w-full rounded-md px-3 py-2 text-left text-sm text-editor-busy transition hover:bg-red-50 hover:text-editor-error focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+            class:bg-red-50={deleteArmed}
+            class:text-editor-error={deleteArmed}
+            onclick={handleDeleteDocument}
+          >
+            {deleteArmed ? 'Click again to delete' : 'Delete this document'}
+          </button>
+        {/if}
       </div>
 
       <button
