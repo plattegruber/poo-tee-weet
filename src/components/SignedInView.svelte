@@ -111,6 +111,7 @@
   let mobileMenuHistoryActive = false;
   let ignoreNextPopStateClose = false;
   let touchStartX: number | null = null;
+  let isSwitchingDocument = false;
   let deleteArmed = $state(false);
   let deleteArmTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -320,8 +321,9 @@
 
   const setDocumentTagsState = (value: string[] | null | undefined) => {
     const normalized = normalizeTagList(value);
-    documentTags = normalized;
-    tagInputValue = '';
+    if (!areTagListsEqual(documentTags, normalized)) {
+      documentTags = normalized;
+    }
   };
 
   const upsertCurrentDocumentTags = (normalized: string[]) => {
@@ -454,6 +456,45 @@
     selectedTags = selectedTags.filter((_, index) => index !== existingIndex);
   };
 
+  const ALLOWED_TAGS = new Set([
+    'P', 'BR', 'DIV', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'H2', 'H3', 'UL', 'OL', 'LI', 'BLOCKQUOTE',
+  ]);
+  const DROP_TAGS = new Set([
+    'SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'SVG', 'IMG', 'VIDEO', 'AUDIO', 'LINK', 'META', 'TEMPLATE',
+  ]);
+
+  // Keep only structural and inline-emphasis tags, no attributes. Anything else is
+  // unwrapped to its text so pasted or legacy markup cannot carry styles or scripts.
+  const sanitizeHtml = (html: string) => {
+    if (typeof document === 'undefined') return html;
+    const temp = document.createElement('div');
+    temp.innerHTML = html;
+    const walk = (node: Node) => {
+      for (const child of Array.from(node.childNodes)) {
+        if (child.nodeType === Node.TEXT_NODE) continue;
+        if (child.nodeType !== Node.ELEMENT_NODE) {
+          child.remove();
+          continue;
+        }
+        const element = child as HTMLElement;
+        if (DROP_TAGS.has(element.tagName)) {
+          element.remove();
+          continue;
+        }
+        walk(element);
+        if (!ALLOWED_TAGS.has(element.tagName)) {
+          element.replaceWith(...Array.from(element.childNodes));
+          continue;
+        }
+        for (const attr of Array.from(element.attributes)) {
+          element.removeAttribute(attr.name);
+        }
+      }
+    };
+    walk(temp);
+    return temp.innerHTML;
+  };
+
   const escapeHtml = (value: string) => {
     return value
       .replace(/&/g, '&amp;')
@@ -530,14 +571,14 @@
     }
 
     if (editor) {
-      editor.innerHTML = bodyHtml ?? '';
+      editor.innerHTML = sanitizeHtml(bodyHtml ?? '');
     }
   };
 
   const serializeDocument = () => {
     const titleTextRaw = titleElement?.textContent ?? '';
     const titleText = resolveTitleText(titleTextRaw);
-    const bodyHtml = editor?.innerHTML ?? DEFAULT_BODY;
+    const bodyHtml = sanitizeHtml(editor?.innerHTML ?? DEFAULT_BODY);
     return `<h1>${escapeHtml(titleText)}</h1>${bodyHtml}`;
   };
 
@@ -632,12 +673,28 @@
   };
 
   const handleTitleKeydown = (event: KeyboardEvent) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      focusEditorAtStart();
+      return;
+    }
     if (event.key !== 'ArrowDown' || event.shiftKey) {
       return;
     }
     if (!editor) return;
     event.preventDefault();
     focusEditorAtStart();
+  };
+
+  const handlePaste = (event: ClipboardEvent) => {
+    event.preventDefault();
+    let text = event.clipboardData?.getData('text/plain') ?? '';
+    if (event.currentTarget === titleElement) {
+      text = text.replace(/\s+/g, ' ');
+    }
+    if (text) {
+      document.execCommand('insertText', false, text);
+    }
   };
 
   const handleEditorKeydown = (event: KeyboardEvent) => {
@@ -896,6 +953,7 @@
     realtimeSocket = null;
     realtimeDocId = null;
     realtimeStatus = 'disconnected';
+    pendingAckIds.clear();
 
     if (event.code === 4410) {
       desiredRealtimeDocId = null;
@@ -1053,6 +1111,7 @@
       insertAtStart: true,
     });
     setDocumentTagsState(payload.document.tags);
+    tagInputValue = '';
 
     const { titleText, bodyHtml } = splitDocumentContent(
       payload.document.content || DEFAULT_MARKUP
@@ -1091,6 +1150,7 @@
     isDirty = false;
     updateDocumentIndexEntry(toDocumentMetadata(payload.document));
     setDocumentTagsState(payload.document.tags);
+    tagInputValue = '';
 
     if (isBrowser) {
       window.localStorage.setItem(key, docId);
@@ -1253,29 +1313,34 @@
   };
 
   const handleDocumentSelect = async (candidateId: string) => {
-    if (!candidateId) return;
+    if (!candidateId || isSwitchingDocument) return;
     if (candidateId === docId) {
       closeMobileMenu();
       return;
     }
 
-    const previousDocId = docId;
-    desiredRealtimeDocId = candidateId;
-    await flushRealtimeUpdates();
-    teardownRealtimeConnection();
+    isSwitchingDocument = true;
+    try {
+      const previousDocId = docId;
+      desiredRealtimeDocId = candidateId;
+      await flushRealtimeUpdates();
+      teardownRealtimeConnection();
 
-    const loaded = await loadExistingDocument(candidateId);
-    if (loaded) {
-      if (storageKey && isBrowser) {
-        window.localStorage.setItem(storageKey, candidateId);
+      const loaded = await loadExistingDocument(candidateId);
+      if (loaded) {
+        if (storageKey && isBrowser) {
+          window.localStorage.setItem(storageKey, candidateId);
+        }
+        pendingRealtimePayload = null;
+        pendingAckIds.clear();
+        await ensureRealtimeSession();
+        closeMobileMenu();
+      } else if (previousDocId) {
+        desiredRealtimeDocId = previousDocId;
+        await ensureRealtimeSession();
       }
-      pendingRealtimePayload = null;
-      pendingAckIds.clear();
-      await ensureRealtimeSession();
-      closeMobileMenu();
-    } else if (previousDocId) {
-      desiredRealtimeDocId = previousDocId;
-      await ensureRealtimeSession();
+    } finally {
+      isSwitchingDocument = false;
     }
   };
 
@@ -1374,8 +1439,9 @@
   };
 
   const handleCreateNewDocument = async () => {
-    if (!storageKey) return;
+    if (!storageKey || isSwitchingDocument) return;
 
+    isSwitchingDocument = true;
     await flushRealtimeUpdates();
 
     try {
@@ -1407,6 +1473,7 @@
         insertAtStart: true,
       });
       setDocumentTagsState(payload.document.tags);
+      tagInputValue = '';
 
       const { titleText, bodyHtml } = splitDocumentContent(
         payload.document.content || BLANK_DOCUMENT_MARKUP
@@ -1424,11 +1491,13 @@
       closeMobileMenu();
     } catch (error) {
       saveError = error instanceof Error ? error.message : String(error);
+    } finally {
+      isSwitchingDocument = false;
     }
   };
 
   const handleDeleteDocument = async () => {
-    if (!docId) return;
+    if (!docId || isSwitchingDocument) return;
     if (!deleteArmed) {
       deleteArmed = true;
       deleteArmTimer = setTimeout(() => {
@@ -1517,44 +1586,13 @@
   });
 </script>
 
-<div
-  class="relative min-h-screen bg-editor-background"
-  role="presentation"
-  ontouchstart={handleTouchStart}
-  ontouchend={handleTouchEnd}
-  ontouchcancel={handleTouchCancel}
->
-  <div
-    class="flex min-h-screen w-full flex-col md:grid md:gap-12 md:[grid-template-columns:minmax(var(--edge-min),var(--edge-max))_minmax(var(--editor-min),var(--editor-max))_minmax(var(--edge-min),var(--edge-max))]"
-    style="--edge-min: 12rem; --edge-max: min(20rem, 18vw); --editor-min: 28rem; --editor-max: min(70rem, calc(100vw - (2 * var(--edge-min))));"
-  >
-    <div
-      class="relative hidden h-full md:block"
-      role="presentation"
-      onpointerenter={handleSidebarPointerEnter}
-      onpointerleave={handleSidebarPointerLeave}
-    >
-      <aside
-        class="relative flex h-full flex-col bg-white/95 px-5 py-6 text-editor-text opacity-0 transition-opacity"
-        class:opacity-100={sidebarVisible}
-        class:shadow-xl={sidebarVisible}
-        style:transition-duration={sidebarVisible ? '150ms' : '260ms'}
-        bind:this={sidebarElement}
-        onfocusin={handleSidebarFocusIn}
-        onfocusout={handleSidebarFocusOut}
-        role="navigation"
-        aria-label="Document list"
-      >
-        <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-editor-busy">
-          Documents
-        </h2>
-
+{#snippet sidebarContent(focusable: boolean)}
         <button
           type="button"
           class="mb-4 inline-flex w-full items-center justify-center rounded-md bg-accent px-3 py-2 text-sm font-semibold text-white transition hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
           data-sidebar-action
           onclick={handleCreateNewDocument}
-          tabindex={sidebarVisible ? 0 : -1}
+          tabindex={focusable ? 0 : -1}
         >
           New document
         </button>
@@ -1567,7 +1605,7 @@
                   type="button"
                   class="text-xs font-semibold uppercase tracking-wide text-accent transition hover:text-accent/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
                   onclick={clearTagFilter}
-                  tabindex={sidebarVisible ? 0 : -1}
+                  tabindex={focusable ? 0 : -1}
                 >
                   Clear
                 </button>
@@ -1587,7 +1625,7 @@
                       }`}
                       aria-pressed={isTagSelected(tag)}
                       onclick={() => toggleTagSelection(tag)}
-                      tabindex={sidebarVisible ? 0 : -1}
+                      tabindex={focusable ? 0 : -1}
                     >
                       {tag}
                     </button>
@@ -1622,7 +1660,7 @@
                   aria-current={docId === entry.docId ? 'page' : undefined}
                   data-doc-button
                   onclick={() => handleDocumentSelect(entry.docId)}
-                  tabindex={sidebarVisible ? 0 : -1}
+                  tabindex={focusable ? 0 : -1}
                 >
                   <span class="block truncate">{entry.title}</span>
                 </button>
@@ -1638,11 +1676,46 @@
             class:bg-red-50={deleteArmed}
             class:text-editor-error={deleteArmed}
             onclick={handleDeleteDocument}
-            tabindex={sidebarVisible ? 0 : -1}
+            tabindex={focusable ? 0 : -1}
           >
             {deleteArmed ? 'Click again to delete' : 'Delete this document'}
           </button>
         {/if}
+{/snippet}
+
+<div
+  class="relative min-h-screen bg-editor-background"
+  role="presentation"
+  ontouchstart={handleTouchStart}
+  ontouchend={handleTouchEnd}
+  ontouchcancel={handleTouchCancel}
+>
+  <div
+    class="flex min-h-screen w-full flex-col md:grid md:gap-12 md:[grid-template-columns:minmax(var(--edge-min),var(--edge-max))_minmax(var(--editor-min),var(--editor-max))_minmax(var(--edge-min),var(--edge-max))]"
+    style="--edge-min: 12rem; --edge-max: min(20rem, 18vw); --editor-min: 28rem; --editor-max: min(70rem, calc(100vw - (2 * var(--edge-min))));"
+  >
+    <div
+      class="relative hidden h-full md:block"
+      role="presentation"
+      onpointerenter={handleSidebarPointerEnter}
+      onpointerleave={handleSidebarPointerLeave}
+    >
+      <aside
+        class="relative flex h-full flex-col bg-white/95 px-5 py-6 text-editor-text opacity-0 transition-opacity"
+        class:opacity-100={sidebarVisible}
+        class:shadow-xl={sidebarVisible}
+        style:transition-duration={sidebarVisible ? '150ms' : '260ms'}
+        bind:this={sidebarElement}
+        onfocusin={handleSidebarFocusIn}
+        onfocusout={handleSidebarFocusOut}
+        role="navigation"
+        aria-label="Document list"
+      >
+        <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-editor-busy">
+          Documents
+        </h2>
+
+        {@render sidebarContent(sidebarVisible)}
       </aside>
     </div>
 
@@ -1674,6 +1747,7 @@
             oninput={handleTitleInput}
             onblur={handleTitleBlur}
             onkeydown={handleTitleKeydown}
+            onpaste={handlePaste}
             data-testid="editor-title"
           >
             {DEFAULT_TITLE}
@@ -1735,6 +1809,7 @@
             oninput={handleInput}
             onblur={handleBlur}
             onkeydown={handleEditorKeydown}
+            onpaste={handlePaste}
             data-testid="editor-body"
           >
             {@html DEFAULT_BODY}
@@ -1775,93 +1850,7 @@
           </button>
         </div>
 
-        <button
-          type="button"
-          class="mb-4 inline-flex w-full items-center justify-center rounded-md bg-accent px-3 py-2 text-sm font-semibold text-white transition hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-          onclick={handleCreateNewDocument}
-        >
-          New document
-        </button>
-
-        {#if availableTags.length > 0 || selectedTags.length > 0}
-          <section class="mb-4" aria-label="Tag filter">
-            <div class="mb-2 flex items-center justify-end">
-              {#if selectedTags.length > 0}
-                <button
-                  type="button"
-                  class="text-xs font-semibold uppercase tracking-wide text-accent transition hover:text-accent/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-                  onclick={clearTagFilter}
-                >
-                  Clear
-                </button>
-              {/if}
-            </div>
-
-            {#if availableTags.length > 0}
-              <ul class="flex flex-wrap gap-2">
-                {#each availableTags as tag (tag.toLowerCase())}
-                  <li>
-                    <button
-                      type="button"
-                      class={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ring-1 ring-inset transition focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
-                        isTagSelected(tag)
-                          ? 'bg-accent text-white ring-accent'
-                          : 'bg-gray-50 text-gray-700 ring-gray-200 hover:ring-gray-300'
-                      }`}
-                      aria-pressed={isTagSelected(tag)}
-                      onclick={() => toggleTagSelection(tag)}
-                    >
-                      {tag}
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </section>
-        {/if}
-
-        {#if indexError}
-          <p class="mb-3 text-sm text-editor-error">{indexError}</p>
-        {/if}
-
-        {#if isIndexLoading && documents.length === 0}
-          <p class="mb-4 text-sm text-editor-busy">Loading…</p>
-        {:else if documents.length === 0}
-          <p class="mb-4 text-sm text-editor-busy">No saved documents yet.</p>
-        {:else if filteredDocuments.length === 0}
-          <p class="mb-4 text-sm text-editor-busy">No documents match the selected tags.</p>
-        {/if}
-
-        <nav aria-label="Document titles">
-          <ul class="space-y-1 overflow-y-auto">
-            {#each filteredDocuments as entry (entry.docId)}
-              <li>
-                <button
-                  type="button"
-                  class="relative w-full rounded-md border-l-4 border-transparent px-3 py-2 text-left text-base transition hover:bg-editor-background focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-                  class:border-accent={docId === entry.docId}
-                  class:font-semibold={docId === entry.docId}
-                  aria-current={docId === entry.docId ? 'page' : undefined}
-                  onclick={() => handleDocumentSelect(entry.docId)}
-                >
-                  <span class="block truncate">{entry.title}</span>
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </nav>
-
-        {#if docId}
-          <button
-            type="button"
-            class="mt-4 w-full rounded-md px-3 py-2 text-left text-sm text-editor-busy transition hover:bg-red-50 hover:text-editor-error focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-            class:bg-red-50={deleteArmed}
-            class:text-editor-error={deleteArmed}
-            onclick={handleDeleteDocument}
-          >
-            {deleteArmed ? 'Click again to delete' : 'Delete this document'}
-          </button>
-        {/if}
+        {@render sidebarContent(true)}
       </div>
 
       <button
