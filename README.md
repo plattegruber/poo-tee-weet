@@ -1,39 +1,46 @@
 # poo-tee-weet
 
-## Scripts
+A distraction free writing tool. Live at https://poo-tee-weet.com.
 
-- `npm run dev` – start the Vite dev server with hot reload.
-- `npm run dev:worker` – run the Cloudflare Worker locally with Wrangler.
-- `npm run build` – generate a production build in `dist/`.
-- `npm run preview` – preview the production build locally.
-- `npm run format` – format source files with Prettier.
-- `npm run typecheck` – run TypeScript in checkJs mode for JSDoc types.
+Svelte 5 + Tailwind SPA in `src/`, Clerk for auth, and a Cloudflare Worker in `worker/` with two Durable Objects: `DocumentDO` holds one document, `UserIndexDO` holds one user's document list. Autosave runs over a WebSocket to the document's Durable Object.
+
+## Scripts (pnpm)
+
+- `pnpm dev` – Vite dev server with hot reload.
+- `pnpm dev:worker` – run the Worker locally with Wrangler on port 8787.
+- `pnpm build` – production build into `dist/`.
+- `pnpm preview` – serve the production build locally.
+- `pnpm typecheck` – svelte-check over the frontend.
+- `pnpm typecheck:worker` – tsc over the Worker.
+- `pnpm format` – Prettier.
 
 ## Environment
 
-- Copy `.env.example` to `.env` (or `.env.local`) and set:
+- Copy `.env.example` to `.env`:
   - `VITE_CLERK_PUBLISHABLE_KEY` – Clerk publishable key.
-  - `VITE_WORKER_BASE_URL` – base URL for the Worker (defaults to `http://127.0.0.1:8787`).
-- Copy `.dev.vars.example` to `.dev.vars` and set:
+  - `VITE_WORKER_BASE_URL` – Worker origin (defaults to `http://127.0.0.1:8787`).
+- Copy `.dev.vars.example` to `.dev.vars`:
   - `CLERK_SECRET_KEY` – Clerk secret key.
-  - `ALLOWED_ORIGINS` – comma separated list of origins allowed to call the Worker.
+  - `ALLOWED_ORIGINS` – comma separated origins allowed to call the Worker. Production value lives in `wrangler.toml` under `[vars]`.
 
-## Authentication
+The frontend asks Clerk for a token using the JWT template named `poo-tee-weet`; that template must exist in the Clerk instance.
 
-- Visit `http://localhost:5173#/sign-up` to create a new Clerk account, or use `#/sign-in` for existing users.
-- Successful sign-in returns you to the editor with a Clerk user menu pinned to the top-right corner.
+## Auth
 
-## Backend Worker
+Visit `http://localhost:5173#/sign-up` to create an account or `#/sign-in` for existing users.
 
-- The Worker entry point lives in `worker/src/index.ts` and exposes REST endpoints for document CRUD.
-- Durable Objects:
-  - `DocumentDO` stores canonical document content.
-  - `UserIndexDO` manages per-user document indexes and orchestrates writes.
-- Run `npm run dev:worker` to start Wrangler locally (`wrangler dev --local`), then launch the Vite dev server in a second terminal.
-- Production deploys are triggered through the Cloudflare deployment automation (build + `wrangler deploy`).
-- Deploy using your usual Wrangler deployment flow (`wrangler deploy`) once environment variables are configured.
+## Worker API
 
-## JSDoc Types
+All routes require `Authorization: Bearer <clerk token>` (WebSocket upgrades pass it as `?auth=`).
 
-- Source files opt into type checking with `// @ts-check`.
-- Add `@type`/`@param` annotations to expose types to editors and `npm run typecheck`.
+- `GET /me/docs` – list documents and tags.
+- `POST /me/docs` – create a document `{ title, content, tags }`.
+- `GET /docs/:id` – read a document.
+- `POST /docs/:id` – update a document.
+- `DELETE /docs/:id` – delete a document and its index entry.
+- `GET /docs/:id/sync` (WebSocket) – realtime autosave; server sends `snapshot`, `ack`, `remote-update`.
+
+## Deploying
+
+- **Frontend:** Cloudflare Pages project `poo-tee-weet` builds `main` from GitHub automatically. Pushing to `main` deploys the site.
+- **Worker:** manual. Run `pnpm wrangler deploy` after logging in with `wrangler login`. The only secret is `CLERK_SECRET_KEY`, set with `wrangler secret put CLERK_SECRET_KEY`.
