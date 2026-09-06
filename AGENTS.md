@@ -3,7 +3,8 @@
 ## Layout
 
 - `src/App.svelte` – Clerk provider and signed-in/out switch.
-- `src/components/SignedInView.svelte` – the whole editor: sidebar, tags, contenteditable editor, WebSocket autosave.
+- `src/components/SignedInView.svelte` – the whole signed-in app: the writing page (top bar, title, tags, contenteditable body, WebSocket autosave) and the pages list (tag filter, search). Screens are switched with local state, no router.
+- `src/components/Icon.svelte` – the few Lucide glyphs the interface uses, inlined.
 - `src/components/SignedOutView.svelte` – Clerk sign-in/sign-up.
 - `worker/src/index.ts` – Worker router plus `UserIndexDO` and `DocumentDO`.
 - `wrangler.toml` – Worker config; production `ALLOWED_ORIGINS` is set here.
@@ -18,7 +19,7 @@
 ## Style
 
 - Code is TypeScript inside Svelte 5 (runes) and TypeScript in the Worker. Prettier defaults: two-space indent, semicolons, trailing commas.
-- Tailwind utilities over custom CSS. Theme tokens live in `tailwind.config.js`.
+- Tailwind utilities over custom CSS. Theme tokens live in `tailwind.config.js`: oat paper surfaces, plum-cast ink, a single plum accent; Literata for titles and prose, Public Sans for interface text, IBM Plex Mono for tags and counts. Copy is sentence case, quiet, no emoji.
 - Keep it flat and small. Prefer adding to the existing file over new abstractions unless the file is clearly the wrong place.
 
 ## Testing

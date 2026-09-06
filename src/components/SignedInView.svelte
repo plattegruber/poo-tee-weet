@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import { UserButton, useClerkContext } from 'svelte-clerk/client';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import { useClerkContext } from 'svelte-clerk/client';
+  import Icon from './Icon.svelte';
 
   type DocumentResponse = {
     document: {
@@ -42,83 +43,75 @@
   const REALTIME_SEND_INTERVAL_MS = 350;
   const REALTIME_RECONNECT_DELAY_MS = 2000;
   const DEFAULT_TITLE = 'Welcome to poo-tee-weet';
-  const DEFAULT_UNTITLED = '(No title)';
+  const DEFAULT_UNTITLED = 'Untitled';
+  const LEGACY_UNTITLED = '(No title)';
   const DEFAULT_BODY = `<p>A distraction free writing tool.</p><p>So it goes.</p>`;
   const DEFAULT_MARKUP = `<h1>${DEFAULT_TITLE}</h1>${DEFAULT_BODY}`;
-  const BLANK_DOCUMENT_MARKUP = '<h1></h1><p><br /></p>';
+  const BLANK_DOCUMENT_MARKUP = '<h1></h1>';
   const MAX_TAGS_PER_DOCUMENT = 20;
   const MAX_TAG_LENGTH = 48;
-  const SIDEBAR_HIDE_DELAY_MS = 180;
-  const TOUCH_EDGE_THRESHOLD_PX = 32;
-  const TOUCH_OPEN_DISTANCE_PX = 48;
+  const TOAST_DURATION_MS = 5000;
   const isBrowser = typeof window !== 'undefined';
 
   const clerk = useClerkContext();
 
   let titleElement: HTMLElement | null = null;
   let editor: HTMLElement | null = null;
+  let tagInputElement = $state<HTMLInputElement | null>(null);
+  let searchInputElement = $state<HTMLInputElement | null>(null);
   let docId = $state<string | null>(null);
   let hasInitialized = false;
 
+  let screen = $state<'editor' | 'pages'>('editor');
+  let isReady = $state(false);
   let documentTags = $state<string[]>([]);
   let tagInputValue = $state('');
+  let isAddingTag = $state(false);
   let selectedTags = $state<string[]>([]);
+  let isSearching = $state(false);
+  let searchQuery = $state('');
   let isDirty = $state(false);
   let saveError = $state<string | null>(null);
   let lastSavedAt = $state<string | null>(null);
+  let wordCount = $state(0);
+  let barHidden = $state(false);
+  let focusMode = $state(false);
+  let menuOpen = $state(false);
+  let confirmDelete = $state(false);
+  let toast = $state<string | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let realtimeStatus = $state<'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'>(
     'idle'
   );
   let realtimeError = $state<string | null>(null);
-  const realtimeStatusLabel = $derived.by(() => {
-    switch (realtimeStatus) {
-      case 'connected':
-        return 'Connected to autosave service';
-      case 'connecting':
-        return 'Connecting to autosave service';
-      case 'error':
-        return 'Autosave connection error';
-      case 'disconnected':
-        return 'Autosave is offline';
-      default:
-        return 'Autosave idle';
-    }
-  });
-  const REALTIME_STATUS_STYLES: Record<
-    'idle' | 'connecting' | 'connected' | 'disconnected' | 'error',
-    string
-  > = {
-    idle: 'bg-gray-300 text-white',
-    connecting: 'bg-amber-400 text-white',
-    connected: 'bg-emerald-500 text-white',
-    disconnected: 'bg-gray-400 text-white',
-    error: 'bg-red-500 text-white',
-  };
-  const realtimeIndicatorClass = $derived.by(() => {
-    return REALTIME_STATUS_STYLES[realtimeStatus] ?? REALTIME_STATUS_STYLES.idle;
-  });
   let documents = $state<DocumentIndexEntry[]>([]);
   let isIndexLoading = $state(false);
   let indexError = $state<string | null>(null);
-  let isMobileMenuOpen = $state(false);
-  let sidebarVisible = $state(false);
-  let isSidebarForced = $state(false);
   let hasFrozenOrder = false;
-  let sidebarElement: HTMLElement | null = null;
-  let sidebarHideTimer: ReturnType<typeof setTimeout> | null = null;
-  let isSidebarPointerInside = false;
-  let sidebarHasFocus = false;
-  let mobileMenuHistoryActive = false;
-  let ignoreNextPopStateClose = false;
-  let touchStartX: number | null = null;
   let isSwitchingDocument = false;
-  let deleteArmed = $state(false);
-  let deleteArmTimer: ReturnType<typeof setTimeout> | null = null;
 
   const availableTags = $derived.by(() => buildTagCloud(documents));
   const filteredDocuments = $derived.by(() =>
-    filterDocumentsByTags(documents, selectedTags)
+    filterDocuments(documents, selectedTags, searchQuery)
   );
+  const currentTitle = $derived.by(() => {
+    const entry = documents.find((item) => item.docId === docId);
+    return entry ? entry.title : DEFAULT_UNTITLED;
+  });
+  const statusText = $derived.by(() => {
+    if (saveError) {
+      return "Couldn't save. Check your connection and try again.";
+    }
+    if (isDirty || realtimeStatus === 'connecting') {
+      return `${wordCount.toLocaleString()} ${wordCount === 1 ? 'word' : 'words'}`;
+    }
+    return 'Saved';
+  });
+  const statusTone = $derived.by(() => {
+    if (saveError) return 'text-danger';
+    if (isDirty || realtimeStatus === 'connecting') return 'text-text-faint';
+    return 'text-success';
+  });
 
   type RealtimeUpdatePayload = {
     title: string;
@@ -161,13 +154,31 @@
     }
   });
 
-  const formatTimestamp = (iso: string) => {
-    try {
-      const value = new Date(iso);
-      return value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return '';
+  // Relative under a week, then "12 Mar", then "12 Mar 2025".
+  const formatDate = (iso: string) => {
+    const value = new Date(iso);
+    if (Number.isNaN(value.getTime())) return '';
+    const now = new Date();
+    const diffMs = now.getTime() - value.getTime();
+    const minutes = Math.round(diffMs / 60000);
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24 && value.getDate() === now.getDate()) {
+      return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
     }
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const days = Math.round((startOfToday.getTime() - value.getTime()) / 86400000);
+    if (days <= 1) return 'Yesterday';
+    if (days < 7) return `${days} days ago`;
+    const day = value.getDate();
+    const month = value.toLocaleDateString('en', { month: 'short' });
+    if (value.getFullYear() === now.getFullYear()) return `${day} ${month}`;
+    return `${day} ${month} ${value.getFullYear()}`;
+  };
+
+  const isUntitled = (title: string) => {
+    return title === DEFAULT_UNTITLED || title === LEGACY_UNTITLED;
   };
 
   const sanitizeTitleText = (value: string) => {
@@ -183,7 +194,7 @@
     if (typeof value !== 'string') {
       return null;
     }
-    const trimmed = value.replace(/\s+/g, ' ').trim();
+    const trimmed = value.replace(/\s+/g, ' ').trim().replace(/^#+/, '');
     if (!trimmed) {
       return null;
     }
@@ -251,17 +262,25 @@
       .map((item) => item.label);
   };
 
-  const filterDocumentsByTags = (
+  const filterDocuments = (
     entries: DocumentIndexEntry[],
-    selected: string[]
+    selected: string[],
+    query: string
   ): DocumentIndexEntry[] => {
-    if (!selected.length) {
-      return entries;
-    }
     const needles = selected.map((tag) => tag.toLowerCase());
+    const q = query.trim().toLowerCase();
     return entries.filter((entry) => {
       const haystack = entry.tags.map((tag) => tag.toLowerCase());
-      return needles.every((needle) => haystack.includes(needle));
+      if (!needles.every((needle) => haystack.includes(needle))) {
+        return false;
+      }
+      if (!q) {
+        return true;
+      }
+      return (
+        entry.title.toLowerCase().includes(q) ||
+        haystack.some((tag) => tag.includes(q))
+      );
     });
   };
 
@@ -396,17 +415,34 @@
     persistDocumentTags([...documentTags, sanitized]);
   };
 
+  const startAddingTag = () => {
+    if (documentTags.length >= MAX_TAGS_PER_DOCUMENT) return;
+    isAddingTag = true;
+    tagInputValue = '';
+    void tick().then(() => tagInputElement?.focus());
+  };
+
+  const stopAddingTag = () => {
+    isAddingTag = false;
+    tagInputValue = '';
+  };
+
   const handleTagInputKeydown = (event: KeyboardEvent) => {
-    if (event.key === 'Enter' || event.key === ',') {
+    if (event.key === 'Enter' || event.key === ',' || event.key === 'Tab') {
+      if (event.key === 'Tab' && !tagInputValue.trim()) {
+        stopAddingTag();
+        return;
+      }
       event.preventDefault();
       commitTagValue(tagInputValue);
+      if (event.key === 'Tab') {
+        stopAddingTag();
+      }
       return;
     }
-    if (event.key === 'Tab') {
-      if (tagInputValue.trim()) {
-        event.preventDefault();
-        commitTagValue(tagInputValue);
-      }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      stopAddingTag();
       return;
     }
     if (event.key === 'Backspace' && tagInputValue.trim() === '') {
@@ -422,6 +458,7 @@
     if (tagInputValue.trim()) {
       commitTagValue(tagInputValue);
     }
+    stopAddingTag();
   };
 
   const clearTagFilter = () => {
@@ -454,6 +491,15 @@
       return;
     }
     selectedTags = selectedTags.filter((_, index) => index !== existingIndex);
+  };
+
+  const toggleSearch = () => {
+    isSearching = !isSearching;
+    if (!isSearching) {
+      searchQuery = '';
+      return;
+    }
+    void tick().then(() => searchInputElement?.focus());
   };
 
   const ALLOWED_TAGS = new Set([
@@ -557,28 +603,39 @@
     };
   };
 
-  const computeTitle = (html: string) => {
-    if (typeof document === 'undefined') {
-      return DEFAULT_TITLE;
-    }
-    const { titleText } = splitDocumentContent(html);
-    return titleText || DEFAULT_UNTITLED;
+  const countWords = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return 0;
+    return trimmed.split(/\s+/).length;
+  };
+
+  const updateWordCount = () => {
+    wordCount = countWords(editor?.innerText ?? '');
+  };
+
+  const hasVisibleText = (html: string) => {
+    if (typeof document === 'undefined') return html.trim().length > 0;
+    const temp = document.createElement('div');
+    temp.innerHTML = html;
+    return (temp.textContent ?? '').trim().length > 0;
   };
 
   const applyDocumentContent = (titleText: string, bodyHtml: string) => {
     if (titleElement) {
-      titleElement.textContent = titleText || DEFAULT_TITLE;
+      titleElement.textContent = isUntitled(titleText) ? '' : titleText;
     }
 
     if (editor) {
-      editor.innerHTML = sanitizeHtml(bodyHtml ?? '');
+      const clean = sanitizeHtml(bodyHtml ?? '');
+      editor.innerHTML = hasVisibleText(clean) ? clean : '';
     }
+    updateWordCount();
   };
 
   const serializeDocument = () => {
     const titleTextRaw = titleElement?.textContent ?? '';
     const titleText = resolveTitleText(titleTextRaw);
-    const bodyHtml = sanitizeHtml(editor?.innerHTML ?? DEFAULT_BODY);
+    const bodyHtml = sanitizeHtml(editor?.innerHTML ?? '');
     return `<h1>${escapeHtml(titleText)}</h1>${bodyHtml}`;
   };
 
@@ -751,7 +808,7 @@
 
   const captureRealtimePayload = (): RealtimeUpdatePayload | null => {
     if (!docId) return null;
-    const title = resolveTitleText(titleElement?.textContent ?? '') || DEFAULT_TITLE;
+    const title = resolveTitleText(titleElement?.textContent ?? '');
     const content = serializeDocument();
     return { title, content, tags: [...documentTags] };
   };
@@ -1074,7 +1131,7 @@
       const response = await apiRequest('/me/docs', { method: 'GET' });
       if (!response.ok) {
         const message = await response.text();
-        indexError = message || `Failed to load documents (${response.status})`;
+        indexError = message || `Couldn't load your pages (${response.status}).`;
         return null;
       }
 
@@ -1097,7 +1154,7 @@
     }
 
     if (!response.ok) {
-      saveError = `Failed to load document (${response.status}).`;
+      saveError = `Couldn't open the page (${response.status}).`;
       return false;
     }
 
@@ -1112,6 +1169,7 @@
     });
     setDocumentTagsState(payload.document.tags);
     tagInputValue = '';
+    isAddingTag = false;
 
     const { titleText, bodyHtml } = splitDocumentContent(
       payload.document.content || DEFAULT_MARKUP
@@ -1123,15 +1181,14 @@
   };
 
   const createDocument = async (key: string) => {
-    const initialContent = serializeDocument();
-    const initialTitle =
-      resolveTitleText(titleElement?.textContent ?? '') || computeTitle(initialContent);
+    const { titleText, bodyHtml } = splitDocumentContent(DEFAULT_MARKUP);
+    applyDocumentContent(titleText, bodyHtml);
 
     const response = await apiRequest('/me/docs', {
       method: 'POST',
       body: JSON.stringify({
-        title: initialTitle,
-        content: initialContent,
+        title: titleText,
+        content: serializeDocument(),
         tags: [],
       }),
     });
@@ -1139,7 +1196,7 @@
     if (!response.ok) {
       const message = await response.text();
       throw new Error(
-        message ? `Document creation failed: ${message}` : 'Document creation failed.'
+        message ? `Couldn't create a page: ${message}` : "Couldn't create a page."
       );
     }
 
@@ -1183,12 +1240,6 @@
 
     if (!docId) {
       await createDocument(storageKey);
-      if (titleElement && !sanitizeTitleText(titleElement.textContent ?? '')) {
-        titleElement.textContent = DEFAULT_TITLE;
-      }
-      if (editor && editor.innerHTML.trim().length === 0) {
-        editor.innerHTML = DEFAULT_BODY;
-      }
     }
 
     if (docId) {
@@ -1198,7 +1249,6 @@
       await ensureRealtimeSession();
     }
   };
-
 
   const updateCurrentDocumentTitle = (value: string) => {
     if (!docId) return;
@@ -1222,100 +1272,87 @@
     }
   };
 
+  const clearIfBlank = (element: HTMLElement | null) => {
+    if (!element) return;
+    if (element.childNodes.length > 0 && !(element.textContent ?? '').trim()) {
+      element.innerHTML = '';
+    }
+  };
+
+  const hideBarWhileTyping = () => {
+    barHidden = true;
+    menuOpen = false;
+  };
+
   const handleTitleInput = () => {
+    clearIfBlank(titleElement);
     const raw = titleElement?.textContent ?? '';
     updateCurrentDocumentTitle(raw);
     isDirty = true;
+    hideBarWhileTyping();
     queueRealtimeUpdate();
   };
 
   const handleInput = () => {
+    clearIfBlank(editor);
+    updateWordCount();
     isDirty = true;
+    hideBarWhileTyping();
     queueRealtimeUpdate();
   };
 
+  // Blur flushes unsent edits; an untouched page is never re-sent, so its
+  // "last edited" time only moves when something actually changed.
+  const flushIfDirty = () => {
+    if (isDirty || pendingRealtimePayload) {
+      queueRealtimeUpdate({ immediate: true });
+    }
+  };
+
   const handleBlur = () => {
-    queueRealtimeUpdate({ immediate: true });
+    flushIfDirty();
   };
 
   const handleTitleBlur = () => {
-    if (titleElement && !sanitizeTitleText(titleElement.textContent ?? '')) {
-      titleElement.textContent = DEFAULT_UNTITLED;
-    }
+    clearIfBlank(titleElement);
     updateCurrentDocumentTitle(titleElement?.textContent ?? DEFAULT_UNTITLED);
-    queueRealtimeUpdate({ immediate: true });
+    flushIfDirty();
   };
 
-  const handleMobileMenuPopState = () => {
-    if (!isBrowser) return;
-    if (ignoreNextPopStateClose) {
-      ignoreNextPopStateClose = false;
-      window.removeEventListener('popstate', handleMobileMenuPopState);
-      mobileMenuHistoryActive = false;
-      return;
-    }
-    if (isMobileMenuOpen) {
-      isMobileMenuOpen = false;
-    }
-    window.removeEventListener('popstate', handleMobileMenuPopState);
-    mobileMenuHistoryActive = false;
-  };
-
-  const openMobileMenu = () => {
-    if (isMobileMenuOpen) return;
-    isMobileMenuOpen = true;
-    if (isBrowser && !mobileMenuHistoryActive) {
-      window.addEventListener('popstate', handleMobileMenuPopState);
-      window.history.pushState({ __ptwMenu: true }, '', window.location.href);
-      mobileMenuHistoryActive = true;
+  const handleMouseMove = () => {
+    if (barHidden) {
+      barHidden = false;
     }
   };
 
-  const closeMobileMenu = (shouldPopHistory = true) => {
-    const wasOpen = isMobileMenuOpen;
-
-    if (wasOpen) {
-      isMobileMenuOpen = false;
-    }
-
-    if (!mobileMenuHistoryActive) {
-      return;
-    }
-
-    if (isBrowser) {
-      if (shouldPopHistory && wasOpen) {
-        ignoreNextPopStateClose = true;
-        window.history.back();
-      } else {
-        window.removeEventListener('popstate', handleMobileMenuPopState);
-        mobileMenuHistoryActive = false;
-      }
-    }
+  const showToast = (message: string) => {
+    if (toastTimer) clearTimeout(toastTimer);
+    toast = message;
+    toastTimer = setTimeout(() => {
+      toast = null;
+      toastTimer = null;
+    }, TOAST_DURATION_MS);
   };
 
-  const handleTouchStart = (event: TouchEvent) => {
-    if (event.touches.length !== 1) return;
-    const touch = event.touches[0];
-    touchStartX = touch.clientX <= TOUCH_EDGE_THRESHOLD_PX ? touch.clientX : null;
+  const showPages = () => {
+    menuOpen = false;
+    confirmDelete = false;
+    barHidden = false;
+    screen = 'pages';
+    flushIfDirty();
   };
 
-  const handleTouchEnd = (event: TouchEvent) => {
-    if (touchStartX === null || event.changedTouches.length === 0) return;
-    const touch = event.changedTouches[0];
-    if (touch.clientX - touchStartX >= TOUCH_OPEN_DISTANCE_PX) {
-      openMobileMenu();
-    }
-    touchStartX = null;
-  };
-
-  const handleTouchCancel = () => {
-    touchStartX = null;
+  const showEditor = () => {
+    isSearching = false;
+    searchQuery = '';
+    barHidden = false;
+    screen = 'editor';
   };
 
   const handleDocumentSelect = async (candidateId: string) => {
     if (!candidateId || isSwitchingDocument) return;
     if (candidateId === docId) {
-      closeMobileMenu();
+      showEditor();
       return;
     }
 
@@ -1334,107 +1371,13 @@
         pendingRealtimePayload = null;
         pendingAckIds.clear();
         await ensureRealtimeSession();
-        closeMobileMenu();
+        showEditor();
       } else if (previousDocId) {
         desiredRealtimeDocId = previousDocId;
         await ensureRealtimeSession();
       }
     } finally {
       isSwitchingDocument = false;
-    }
-  };
-
-  const focusFirstSidebarItem = () => {
-    if (!sidebarElement || typeof document === 'undefined') return;
-    const button =
-      (sidebarElement.querySelector('[data-doc-button]') as HTMLButtonElement | null) ??
-      (sidebarElement.querySelector('[data-sidebar-action]') as HTMLButtonElement | null);
-    button?.focus();
-  };
-
-  const openSidebar = () => {
-    if (sidebarHideTimer) {
-      clearTimeout(sidebarHideTimer);
-      sidebarHideTimer = null;
-    }
-    sidebarVisible = true;
-  };
-
-  const scheduleSidebarHide = () => {
-    if (sidebarHideTimer) {
-      clearTimeout(sidebarHideTimer);
-      sidebarHideTimer = null;
-    }
-    if (isSidebarPointerInside || sidebarHasFocus || isSidebarForced) {
-      return;
-    }
-    sidebarHideTimer = setTimeout(() => {
-      sidebarHideTimer = null;
-      if (!isSidebarPointerInside && !sidebarHasFocus && !isSidebarForced) {
-        sidebarVisible = false;
-      }
-    }, SIDEBAR_HIDE_DELAY_MS);
-  };
-
-  const handleSidebarPointerEnter = () => {
-    isSidebarPointerInside = true;
-    isSidebarForced = false;
-    openSidebar();
-  };
-
-  const handleSidebarPointerLeave = () => {
-    isSidebarPointerInside = false;
-    scheduleSidebarHide();
-  };
-
-  const handleSidebarFocusIn = () => {
-    sidebarHasFocus = true;
-    openSidebar();
-  };
-
-  const handleSidebarFocusOut = () => {
-    if (typeof window === 'undefined' || typeof document === 'undefined') {
-      sidebarHasFocus = false;
-      scheduleSidebarHide();
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      if (!sidebarElement) {
-        sidebarHasFocus = false;
-        scheduleSidebarHide();
-        return;
-      }
-      sidebarHasFocus = sidebarElement.contains(document.activeElement);
-      if (!sidebarHasFocus && !isSidebarPointerInside) {
-        isSidebarForced = false;
-      }
-      if (!sidebarHasFocus) {
-        scheduleSidebarHide();
-      }
-    });
-  };
-
-  const handleGlobalKeydown = (event: KeyboardEvent) => {
-    const key = event.key ? event.key.toLowerCase() : '';
-
-    if ((event.metaKey || event.ctrlKey) && key === 'o') {
-      event.preventDefault();
-      isSidebarForced = true;
-      openSidebar();
-      focusFirstSidebarItem();
-      return;
-    }
-
-    if (key === 'escape') {
-      if (isMobileMenuOpen) {
-        closeMobileMenu();
-        return;
-      }
-      if (isSidebarForced) {
-        isSidebarForced = false;
-        scheduleSidebarHide();
-      }
     }
   };
 
@@ -1458,7 +1401,7 @@
       if (!response.ok) {
         const message = await response.text();
         throw new Error(
-          message ? `Document creation failed: ${message}` : 'Document creation failed.'
+          message ? `Couldn't create a page: ${message}` : "Couldn't create a page."
         );
       }
 
@@ -1474,6 +1417,7 @@
       });
       setDocumentTagsState(payload.document.tags);
       tagInputValue = '';
+      isAddingTag = false;
 
       const { titleText, bodyHtml } = splitDocumentContent(
         payload.document.content || BLANK_DOCUMENT_MARKUP
@@ -1487,8 +1431,10 @@
       }
 
       await ensureRealtimeSession();
-      focusTitleAtEnd();
-      closeMobileMenu();
+      showEditor();
+      if (isBrowser) {
+        window.requestAnimationFrame(() => focusTitleAtEnd());
+      }
     } catch (error) {
       saveError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -1498,15 +1444,8 @@
 
   const handleDeleteDocument = async () => {
     if (!docId || isSwitchingDocument) return;
-    if (!deleteArmed) {
-      deleteArmed = true;
-      deleteArmTimer = setTimeout(() => {
-        deleteArmed = false;
-      }, 4000);
-      return;
-    }
-    if (deleteArmTimer) clearTimeout(deleteArmTimer);
-    deleteArmed = false;
+    confirmDelete = false;
+    menuOpen = false;
 
     const target = docId;
     teardownRealtimeConnection(true);
@@ -1516,7 +1455,7 @@
     try {
       const response = await apiRequest(`/docs/${target}`, { method: 'DELETE' });
       if (!response.ok && response.status !== 404) {
-        throw new Error(`Delete failed (${response.status}).`);
+        throw new Error(`Couldn't delete the page (${response.status}).`);
       }
     } catch (error) {
       saveError = error instanceof Error ? error.message : String(error);
@@ -1539,10 +1478,77 @@
         window.localStorage.setItem(storageKey, next.docId);
       }
       await ensureRealtimeSession();
-      closeMobileMenu();
+      showPages();
+      showToast('Page deleted.');
       return;
     }
     await handleCreateNewDocument();
+    showToast('Page deleted.');
+  };
+
+  const handleExportText = () => {
+    menuOpen = false;
+    if (!isBrowser) return;
+    const title = resolveTitleText(titleElement?.textContent ?? '');
+    const body = (editor?.innerText ?? '').replace(/\n{3,}/g, '\n\n').trim();
+    const text = `${title}\n\n${body}\n`;
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${title.replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80) || 'page'}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleSignOut = async () => {
+    await flushRealtimeUpdates();
+    teardownRealtimeConnection(true);
+    if (isBrowser) {
+      window.location.hash = '#/sign-in';
+    }
+    await clerk.clerk?.signOut();
+  };
+
+  const handleGlobalKeydown = (event: KeyboardEvent) => {
+    const key = event.key ? event.key.toLowerCase() : '';
+
+    if ((event.metaKey || event.ctrlKey) && key === 'o') {
+      event.preventDefault();
+      if (screen === 'editor') {
+        showPages();
+      } else {
+        showEditor();
+      }
+      return;
+    }
+
+    if (key === 'escape') {
+      if (confirmDelete) {
+        confirmDelete = false;
+        return;
+      }
+      if (menuOpen) {
+        menuOpen = false;
+        return;
+      }
+      if (screen === 'pages' && isSearching) {
+        toggleSearch();
+        return;
+      }
+      if (screen === 'editor' && barHidden) {
+        barHidden = false;
+      }
+    }
+  };
+
+  const handleGlobalPointerDown = (event: PointerEvent) => {
+    if (!menuOpen) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('[data-menu]')) return;
+    menuOpen = false;
   };
 
   const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -1552,14 +1558,11 @@
   };
 
   onMount(() => {
-    if (titleElement) {
-      titleElement.focus();
-    } else {
-      editor?.focus();
-    }
     if (isBrowser) {
       window.addEventListener('beforeunload', handleBeforeUnload);
       window.addEventListener('keydown', handleGlobalKeydown);
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('pointerdown', handleGlobalPointerDown);
     }
   });
 
@@ -1567,11 +1570,10 @@
     if (isBrowser) {
       window.removeEventListener('beforeunload', handleBeforeUnload);
       window.removeEventListener('keydown', handleGlobalKeydown);
-      if (mobileMenuHistoryActive) {
-        window.removeEventListener('popstate', handleMobileMenuPopState);
-      }
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('pointerdown', handleGlobalPointerDown);
     }
-    if (deleteArmTimer) clearTimeout(deleteArmTimer);
+    if (toastTimer) clearTimeout(toastTimer);
     void flushRealtimeUpdates();
     teardownRealtimeConnection(true);
   });
@@ -1579,367 +1581,438 @@
   $effect(() => {
     if (!hasInitialized && clerk.isLoaded && clerk.session && editor) {
       hasInitialized = true;
-      void initializeDocument().catch((error) => {
-        saveError = error instanceof Error ? error.message : String(error);
-      });
+      void initializeDocument()
+        .catch((error) => {
+          saveError = error instanceof Error ? error.message : String(error);
+        })
+        .finally(() => {
+          isReady = true;
+          if (isBrowser) {
+            window.requestAnimationFrame(() => {
+              if (screen === 'editor') {
+                (titleElement?.textContent ? editor : titleElement)?.focus();
+              }
+            });
+          }
+        });
     }
   });
+
+  const iconButtonClass =
+    'inline-flex h-control-md w-control-md cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-text-muted transition-colors duration-fast ease-out hover:bg-surface-sunken hover:text-text-body active:bg-surface-sunken disabled:cursor-default disabled:opacity-45';
+  const tagClass =
+    'inline-flex h-6 items-center gap-1 whitespace-nowrap rounded-sm border px-2 font-mono text-sm transition-colors duration-fast ease-out';
+  const menuItemClass =
+    'block w-full cursor-pointer rounded-sm border-0 bg-transparent px-[10px] py-2 text-left font-ui text-md transition-colors duration-fast ease-out';
 </script>
 
-{#snippet sidebarContent(focusable: boolean)}
+{#snippet tooltip(label: string)}
+  <span
+    role="tooltip"
+    class="pointer-events-none absolute left-1/2 top-[calc(100%+6px)] z-50 -translate-x-1/2 whitespace-nowrap rounded-sm bg-surface-inverse px-2 py-1 font-ui text-xs text-text-inverse opacity-0 transition-opacity duration-fast ease-out group-hover:opacity-100 group-focus-visible:opacity-100"
+  >
+    {label}
+  </span>
+{/snippet}
+
+<div class="relative min-h-screen bg-surface-page" role="presentation">
+  <!-- Writing page -->
+  <div class:hidden={screen !== 'editor'}>
+    <header
+      class="fixed inset-x-0 top-0 z-10 flex h-bar items-center gap-2 px-5 transition-opacity duration-slow ease-out"
+      class:opacity-0={barHidden}
+      class:pointer-events-none={barHidden}
+      aria-hidden={barHidden}
+    >
+      <div class="flex flex-1 items-center gap-2">
+        <span class="group relative inline-flex">
+          <button
+            type="button"
+            class={iconButtonClass}
+            aria-label="All pages"
+            onclick={showPages}
+            tabindex={barHidden ? -1 : 0}
+          >
+            <Icon name="arrow-left" size={18} />
+          </button>
+          {@render tooltip('All pages')}
+        </span>
+      </div>
+
+      <div
+        class={`font-mono text-xs transition-colors duration-base ease-out ${statusTone}`}
+        role="status"
+        aria-live="polite"
+      >
+        {statusText}
+      </div>
+
+      <div class="relative flex flex-1 items-center justify-end gap-2" data-menu>
+        <span class="group relative inline-flex">
+          <button
+            type="button"
+            class={iconButtonClass}
+            class:bg-surface-sunken={menuOpen}
+            class:text-text-body={menuOpen}
+            aria-label="More"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onclick={() => (menuOpen = !menuOpen)}
+            tabindex={barHidden ? -1 : 0}
+          >
+            <Icon name="more-horizontal" size={18} />
+          </button>
+          {#if !menuOpen}
+            {@render tooltip('More')}
+          {/if}
+        </span>
+
+        {#if menuOpen}
+          <div
+            class="fade-in absolute right-0 top-10 z-20 grid w-[220px] gap-0.5 rounded-md border border-border-subtle bg-surface-page p-1.5 font-ui text-md shadow-lg"
+            role="menu"
+            aria-label="Page menu"
+          >
+            <div
+              class="flex items-center gap-[10px] rounded-sm px-[10px] py-2 text-text-body transition-colors duration-fast ease-out hover:bg-surface-sunken"
+            >
+              <span
+                role="switch"
+                aria-checked={focusMode}
+                tabindex="0"
+                class="relative inline-block h-[18px] w-8 flex-none cursor-pointer rounded-pill transition-colors duration-fast ease-out"
+                aria-label="Focus mode"
+                class:bg-accent={focusMode}
+                class:bg-border-strong={!focusMode}
+                onclick={() => (focusMode = !focusMode)}
+                onkeydown={(event) => {
+                  if (event.key === ' ' || event.key === 'Enter') {
+                    event.preventDefault();
+                    focusMode = !focusMode;
+                  }
+                }}
+              >
+                <span
+                  class="absolute top-0.5 h-[14px] w-[14px] rounded-full bg-paper-0 transition-[left] duration-fast ease-out"
+                  class:left-4={focusMode}
+                  class:left-0.5={!focusMode}
+                ></span>
+              </span>
+              <span>Focus mode</span>
+            </div>
+            <button
+              type="button"
+              class={`${menuItemClass} text-text-body hover:bg-surface-sunken`}
+              role="menuitem"
+              onclick={handleExportText}
+            >
+              Export as text
+            </button>
+            <button
+              type="button"
+              class={`${menuItemClass} text-danger hover:bg-danger-soft`}
+              role="menuitem"
+              onclick={() => {
+                menuOpen = false;
+                confirmDelete = true;
+              }}
+            >
+              Delete page
+            </button>
+          </div>
+        {/if}
+      </div>
+    </header>
+
+    <main
+      class="mx-auto max-w-prose px-6 pb-[40vh] pt-[120px] transition-opacity duration-base ease-out"
+      class:opacity-0={!isReady}
+    >
+      <h1
+        class="block w-full font-display text-2xl font-regular leading-tight tracking-tight text-text-body outline-none focus:outline-none focus-visible:shadow-none"
+        bind:this={titleElement}
+        contenteditable="true"
+        spellcheck="false"
+        autocapitalize="off"
+        translate="no"
+        lang="en"
+        aria-label="Title"
+        data-placeholder="title"
+        oninput={handleTitleInput}
+        onblur={handleTitleBlur}
+        onkeydown={handleTitleKeydown}
+        onpaste={handlePaste}
+        data-testid="editor-title"
+      ></h1>
+
+      <div
+        class="mt-4 flex flex-wrap items-center gap-1.5 transition-opacity duration-slow ease-out"
+        class:opacity-0={focusMode && barHidden}
+        aria-label="Tags"
+      >
+        {#each documentTags as tag (tag)}
+          <span class={`${tagClass} border-border-subtle text-text-body`}>
+            <span class="opacity-60">#</span>{tag}
+            <button
+              type="button"
+              class="ml-0.5 inline-flex cursor-pointer items-center border-0 bg-transparent p-0 text-current opacity-70 transition-opacity duration-fast ease-out hover:opacity-100"
+              aria-label={`Remove ${tag}`}
+              onclick={() => handleTagRemove(tag)}
+            >
+              <Icon name="x" size={11} />
+            </button>
+          </span>
+        {/each}
+
+        {#if isAddingTag}
+          <input
+            type="text"
+            class="h-6 w-[110px] rounded-sm border border-border-focus bg-transparent px-2 font-mono text-sm text-text-body outline-none placeholder:text-text-faint focus-visible:shadow-none"
+            placeholder="add a tag"
+            bind:this={tagInputElement}
+            bind:value={tagInputValue}
+            onkeydown={handleTagInputKeydown}
+            onblur={handleTagInputBlur}
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            aria-label="New tag"
+          />
+        {:else if documentTags.length < MAX_TAGS_PER_DOCUMENT}
+          <button
+            type="button"
+            class="inline-flex h-6 cursor-pointer items-center gap-1 border-0 bg-transparent px-1.5 font-mono text-sm text-text-faint transition-colors duration-fast ease-out hover:text-text-body"
+            onclick={startAddingTag}
+          >
+            <Icon name="plus" size={12} />
+            {documentTags.length === 0 ? 'add a tag' : ''}
+          </button>
+        {/if}
+      </div>
+
+      <div
+        class="prose-surface tab-size-4 mt-10 block w-full min-h-[50vh] outline-none focus:outline-none focus-visible:shadow-none"
+        bind:this={editor}
+        contenteditable="true"
+        spellcheck="false"
+        autocapitalize="off"
+        translate="no"
+        lang="en"
+        aria-label="Body"
+        role="textbox"
+        aria-multiline="true"
+        tabindex="0"
+        data-placeholder="Start writing."
+        oninput={handleInput}
+        onblur={handleBlur}
+        onkeydown={handleEditorKeydown}
+        onpaste={handlePaste}
+        data-testid="editor-body"
+      ></div>
+    </main>
+  </div>
+
+  <!-- Pages list -->
+  {#if screen === 'pages'}
+    <header class="fixed inset-x-0 top-0 z-10 flex h-bar items-center gap-2 bg-surface-page px-5">
+      <div class="flex flex-1 items-center gap-2">
+        <span class="group relative inline-flex">
+          <button
+            type="button"
+            class={iconButtonClass}
+            aria-label="Sign out"
+            onclick={handleSignOut}
+          >
+            <Icon name="log-out" size={18} />
+          </button>
+          {@render tooltip('Sign out')}
+        </span>
+      </div>
+
+      <div class="font-display text-[16px] tracking-[-0.01em] text-text-muted max-sm:hidden">
+        poo-tee-weet
+      </div>
+
+      <div class="flex flex-1 items-center justify-end gap-2">
+        <span class="group relative inline-flex">
+          <button
+            type="button"
+            class={iconButtonClass}
+            class:bg-surface-sunken={isSearching}
+            class:text-text-body={isSearching}
+            aria-label="Search"
+            aria-pressed={isSearching}
+            onclick={toggleSearch}
+          >
+            <Icon name="search" size={18} />
+          </button>
+          {@render tooltip('Search tags')}
+        </span>
         <button
           type="button"
-          class="mb-4 inline-flex w-full items-center justify-center rounded-md bg-accent px-3 py-2 text-sm font-semibold text-white transition hover:bg-accent/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-          data-sidebar-action
+          class="inline-flex h-control-sm cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md border border-border-strong bg-transparent px-[10px] font-ui text-sm font-medium leading-none text-text-body transition-colors duration-fast ease-out hover:bg-surface-sunken"
           onclick={handleCreateNewDocument}
-          tabindex={focusable ? 0 : -1}
         >
-          New document
+          <Icon name="plus" size={14} />
+          New page
         </button>
+      </div>
+    </header>
 
-        {#if availableTags.length > 0 || selectedTags.length > 0}
-          <section class="mb-4" aria-label="Tag filter">
-            <div class="mb-2 flex items-center justify-end">
-              {#if selectedTags.length > 0}
-                <button
-                  type="button"
-                  class="text-xs font-semibold uppercase tracking-wide text-accent transition hover:text-accent/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-                  onclick={clearTagFilter}
-                  tabindex={focusable ? 0 : -1}
-                >
-                  Clear
-                </button>
-              {/if}
-            </div>
+    <main class="mx-auto max-w-list px-6 py-24">
+      <h1 class="font-display text-2xl font-regular leading-tight tracking-tight text-text-body">
+        Your pages
+      </h1>
 
-            {#if availableTags.length > 0}
-              <ul class="flex flex-wrap gap-2">
-                {#each availableTags as tag (tag.toLowerCase())}
-                  <li>
-                    <button
-                      type="button"
-                      class={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ring-1 ring-inset transition focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
-                        isTagSelected(tag)
-                          ? 'bg-accent text-white ring-accent'
-                          : 'bg-gray-50 text-gray-700 ring-gray-200 hover:ring-gray-300'
-                      }`}
-                      aria-pressed={isTagSelected(tag)}
-                      onclick={() => toggleTagSelection(tag)}
-                      tabindex={focusable ? 0 : -1}
-                    >
-                      {tag}
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </section>
-        {/if}
+      {#if availableTags.length > 0}
+        <div class="mt-6 flex flex-wrap items-center gap-2" aria-label="Filter by tag">
+          {#each availableTags as tag (tag.toLowerCase())}
+            <button
+              type="button"
+              class={`${tagClass} cursor-pointer ${
+                isTagSelected(tag)
+                  ? 'border-accent bg-accent text-accent-on'
+                  : 'border-border-subtle bg-transparent text-text-muted hover:bg-surface-sunken hover:text-text-body'
+              }`}
+              aria-pressed={isTagSelected(tag)}
+              onclick={() => toggleTagSelection(tag)}
+            >
+              <span class="opacity-60">#</span>{tag}
+            </button>
+          {/each}
+          {#if selectedTags.length > 0}
+            <button
+              type="button"
+              class="ml-1 cursor-pointer border-0 bg-transparent p-0 font-ui text-sm text-text-muted transition-colors duration-fast ease-out hover:text-text-body"
+              onclick={clearTagFilter}
+            >
+              Clear
+            </button>
+          {/if}
+        </div>
+      {/if}
 
-        {#if indexError}
-          <p class="mb-3 text-sm text-editor-error">{indexError}</p>
-        {/if}
+      {#if isSearching}
+        <label class="mt-6 flex flex-col gap-1.5 font-ui">
+          <span class="sr-only">Search</span>
+          <input
+            type="text"
+            class="h-control-md w-full rounded-sm border border-border-subtle bg-surface-raised px-3 font-ui text-md leading-normal text-text-body outline-none transition-[border-color,box-shadow] duration-fast ease-out placeholder:text-text-faint focus:border-border-focus focus:shadow-focus"
+            placeholder="search tags or titles"
+            bind:this={searchInputElement}
+            bind:value={searchQuery}
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+        </label>
+      {/if}
 
+      {#if indexError}
+        <p class="mt-6 font-ui text-md text-danger">{indexError}</p>
+      {/if}
+
+      <div class="mt-8 border-t border-border-subtle">
         {#if isIndexLoading && documents.length === 0}
-          <p class="mb-4 text-sm text-editor-busy">Loading…</p>
-        {:else if documents.length === 0}
-          <p class="mb-4 text-sm text-editor-busy">No saved documents yet.</p>
+          <p class="py-8 font-ui text-md text-text-muted">Loading…</p>
         {:else if filteredDocuments.length === 0}
-          <p class="mb-4 text-sm text-editor-busy">No documents match the selected tags.</p>
-        {/if}
-
-        <nav class="flex-1" aria-label="Document titles">
-          <ul class="flex-1 space-y-1 overflow-y-auto pb-2">
+          <p class="py-8 font-ui text-md text-text-muted">
+            {#if documents.length === 0}
+              Nothing here yet. Start writing.
+            {:else if selectedTags.length > 0}
+              No pages tagged <em>{selectedTags.join(', ')}</em>.
+            {:else}
+              No pages match “{searchQuery.trim()}”.
+            {/if}
+          </p>
+        {:else}
+          <ul class="m-0 list-none p-0" aria-label="Pages">
             {#each filteredDocuments as entry (entry.docId)}
               <li>
                 <button
                   type="button"
-                  class="relative w-full rounded-md border-l-4 border-transparent px-3 py-2 text-left text-base transition hover:bg-editor-background focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-                  class:border-accent={docId === entry.docId}
-                  class:font-semibold={docId === entry.docId}
+                  class="group flex w-full cursor-pointer flex-wrap items-baseline gap-x-3 gap-y-1 border-0 border-b border-solid border-border-subtle bg-transparent px-0 py-4 text-left sm:flex-nowrap"
                   aria-current={docId === entry.docId ? 'page' : undefined}
                   data-doc-button
                   onclick={() => handleDocumentSelect(entry.docId)}
-                  tabindex={focusable ? 0 : -1}
                 >
-                  <span class="block truncate">{entry.title}</span>
+                  <span
+                    class="min-w-0 basis-full truncate font-display text-lg text-text-body transition-colors duration-fast ease-out group-hover:text-text-accent sm:basis-auto sm:flex-auto"
+                    class:italic={isUntitled(entry.title)}
+                  >
+                    {isUntitled(entry.title) ? DEFAULT_UNTITLED : entry.title}
+                  </span>
+                  {#if entry.tags.length > 0}
+                    <span class="flex flex-none flex-wrap gap-2 font-mono text-sm text-text-muted">
+                      {#each entry.tags as tag (tag)}
+                        <span>#{tag}</span>
+                      {/each}
+                    </span>
+                  {/if}
+                  <span class="ml-auto min-w-[80px] flex-none text-right font-ui text-sm text-text-faint sm:ml-0">
+                    {formatDate(entry.updatedAt)}
+                  </span>
                 </button>
               </li>
             {/each}
           </ul>
-        </nav>
-
-        {#if docId}
-          <button
-            type="button"
-            class="mt-4 w-full rounded-md px-3 py-2 text-left text-sm text-editor-busy transition hover:bg-red-50 hover:text-editor-error focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-            class:bg-red-50={deleteArmed}
-            class:text-editor-error={deleteArmed}
-            onclick={handleDeleteDocument}
-            tabindex={focusable ? 0 : -1}
-          >
-            {deleteArmed ? 'Click again to delete' : 'Delete this document'}
-          </button>
         {/if}
-{/snippet}
-
-<div
-  class="relative min-h-screen bg-editor-background"
-  role="presentation"
-  ontouchstart={handleTouchStart}
-  ontouchend={handleTouchEnd}
-  ontouchcancel={handleTouchCancel}
->
-  <div
-    class="flex min-h-screen w-full flex-col md:grid md:gap-12 md:[grid-template-columns:minmax(var(--edge-min),var(--edge-max))_minmax(var(--editor-min),var(--editor-max))_minmax(var(--edge-min),var(--edge-max))]"
-    style="--edge-min: 12rem; --edge-max: min(20rem, 18vw); --editor-min: 28rem; --editor-max: min(70rem, calc(100vw - (2 * var(--edge-min))));"
-  >
-    <div
-      class="relative hidden h-full md:block"
-      role="presentation"
-      onpointerenter={handleSidebarPointerEnter}
-      onpointerleave={handleSidebarPointerLeave}
-    >
-      <aside
-        class="relative flex h-full flex-col bg-white/95 px-5 py-6 text-editor-text opacity-0 transition-opacity"
-        class:opacity-100={sidebarVisible}
-        class:shadow-xl={sidebarVisible}
-        style:transition-duration={sidebarVisible ? '150ms' : '260ms'}
-        bind:this={sidebarElement}
-        onfocusin={handleSidebarFocusIn}
-        onfocusout={handleSidebarFocusOut}
-        role="navigation"
-        aria-label="Document list"
-      >
-        <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-editor-busy">
-          Documents
-        </h2>
-
-        {@render sidebarContent(sidebarVisible)}
-      </aside>
-    </div>
-
-    <main class="relative flex min-h-screen flex-col px-4 pb-24 pt-16 sm:px-8 md:px-10 md:pb-32 md:pt-20">
-      <button
-        type="button"
-        class="absolute left-6 top-6 z-30 flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-white shadow-md transition hover:bg-editor-background focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 md:hidden"
-        aria-label="Open document list"
-        onclick={openMobileMenu}
-      >
-        <span class="flex flex-col items-center justify-center gap-1">
-          <span class="h-0.5 w-5 bg-editor-text"></span>
-          <span class="h-0.5 w-5 bg-editor-text"></span>
-          <span class="h-0.5 w-5 bg-editor-text"></span>
-        </span>
-      </button>
-
-      <section class="flex w-full flex-1 flex-col px-4 sm:px-6 lg:px-10">
-        <div class="mx-auto flex w-full max-w-3xl flex-1 flex-col">
-          <h1
-            class="mb-6 w-full text-4xl font-heading leading-tight focus:outline-none"
-            bind:this={titleElement}
-            contenteditable="true"
-            spellcheck="false"
-            autocapitalize="off"
-            translate="no"
-            lang="en"
-            aria-label="Document title"
-            oninput={handleTitleInput}
-            onblur={handleTitleBlur}
-            onkeydown={handleTitleKeydown}
-            onpaste={handlePaste}
-            data-testid="editor-title"
-          >
-            {DEFAULT_TITLE}
-          </h1>
-
-          <div class="mb-8">
-            <div class="flex flex-wrap items-center gap-2 rounded-md border border-black/10 bg-white/80 px-3 py-2">
-              {#each documentTags as tag (tag)}
-                <span class="inline-flex items-center gap-x-1.5 rounded-full bg-gray-50 px-3 py-1 text-xs font-medium text-gray-700 ring-1 ring-inset ring-gray-500/15">
-                  <span>{tag}</span>
-                  <button
-                    type="button"
-                    class="group relative -mr-1 flex h-4 w-4 items-center justify-center rounded-sm text-gray-500 transition hover:bg-gray-500/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-                    onclick={() => handleTagRemove(tag)}
-                  >
-                    <span class="sr-only">Remove {tag}</span>
-                    <svg
-                      viewBox="0 0 14 14"
-                      class="h-3.5 w-3.5 stroke-gray-500/70 group-hover:stroke-gray-600"
-                      aria-hidden="true"
-                    >
-                      <path d="M4 4l6 6m0-6-6 6" fill="none" stroke-width="1.5" stroke-linecap="round" />
-                    </svg>
-                  </button>
-                </span>
-              {/each}
-
-              <input
-                id="document-tags-input"
-                type="text"
-                class="flex-1 border-none bg-transparent text-sm text-editor-text placeholder:text-editor-busy outline-none focus:outline-none"
-                placeholder={documentTags.length === 0 ? 'Add a tag…' : 'Add another tag'}
-                bind:value={tagInputValue}
-                onkeydown={handleTagInputKeydown}
-                onblur={handleTagInputBlur}
-                autocomplete="off"
-                autocapitalize="off"
-                spellcheck="false"
-              />
-            </div>
-
-            {#if documentTags.length >= MAX_TAGS_PER_DOCUMENT}
-              <p class="mt-2 text-xs text-editor-error">Tag limit reached.</p>
-            {/if}
-          </div>
-
-          <div
-            class="tab-size-4 w-full flex-1 text-lg leading-relaxed focus:outline-none"
-            bind:this={editor}
-            contenteditable="true"
-            spellcheck="false"
-            autocapitalize="off"
-            translate="no"
-            lang="en"
-            aria-label="Writing editor"
-            role="textbox"
-            aria-multiline="true"
-            tabindex="0"
-            oninput={handleInput}
-            onblur={handleBlur}
-            onkeydown={handleEditorKeydown}
-            onpaste={handlePaste}
-            data-testid="editor-body"
-          >
-            {@html DEFAULT_BODY}
-          </div>
-
-          <div class="mt-6 text-sm leading-heading" aria-live="polite">
-            {#if saveError}
-              <span class="inline-flex items-center gap-1 text-editor-error">
-                We hit a snag saving: {saveError}
-              </span>
-            {/if}
-          </div>
-        </div>
-      </section>
+      </div>
     </main>
+  {/if}
 
-    <div class="relative hidden h-full md:block" aria-hidden="true"></div>
-  </div>
-
-  {#if isMobileMenuOpen}
+  <!-- Delete confirmation -->
+  {#if confirmDelete}
     <div
-      class="fixed inset-0 z-30 flex bg-black/40 backdrop-blur-sm md:hidden"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Document list"
+      class="fade-in fixed inset-0 z-[100] flex items-center justify-center bg-scrim p-6"
+      role="presentation"
+      onclick={(event) => {
+        if (event.target === event.currentTarget) confirmDelete = false;
+      }}
     >
-      <div class="h-full w-72 max-w-[80%] bg-white/95 px-5 py-6 text-editor-text shadow-xl">
-        <div class="mb-4 flex items-center justify-between">
-          <h2 class="text-sm font-semibold uppercase tracking-wide text-editor-busy">
-            Documents
-          </h2>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-title"
+        class="w-full max-w-dialog rounded-lg border border-border-subtle bg-surface-page p-6 font-ui shadow-lg"
+      >
+        <h2
+          id="delete-title"
+          class="m-0 font-display text-xl font-regular leading-snug text-text-body"
+        >
+          Delete ‘{isUntitled(currentTitle) ? DEFAULT_UNTITLED : currentTitle}’?
+        </h2>
+        <p class="mb-0 mt-2 text-md leading-normal text-text-muted">This can't be undone.</p>
+        <div class="mt-6 flex justify-end gap-2">
           <button
             type="button"
-            class="rounded-full px-3 py-1 text-sm text-editor-text hover:bg-editor-background focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-            onclick={() => closeMobileMenu()}
+            class="inline-flex h-control-md cursor-pointer items-center justify-center rounded-md border border-transparent bg-transparent px-[14px] font-ui text-md font-medium leading-none text-text-muted transition-colors duration-fast ease-out hover:bg-surface-sunken hover:text-text-body"
+            onclick={() => (confirmDelete = false)}
           >
-            Close
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="inline-flex h-control-md cursor-pointer items-center justify-center rounded-md border border-border-strong bg-transparent px-[14px] font-ui text-md font-medium leading-none text-danger transition-colors duration-fast ease-out hover:border-danger hover:bg-danger-soft"
+            onclick={handleDeleteDocument}
+          >
+            Delete page
           </button>
         </div>
-
-        {@render sidebarContent(true)}
       </div>
-
-      <button
-        type="button"
-        class="flex-1"
-        aria-label="Close document list"
-        onclick={() => closeMobileMenu()}
-      ></button>
     </div>
   {/if}
 
-  <div class="fixed right-6 top-6 z-20">
-    <UserButton afterSignOutUrl="#/sign-in" />
-  </div>
-
-  <div class="pointer-events-none fixed bottom-6 right-6 z-20 flex flex-col items-end gap-2">
-    <div
-      class={`flex h-12 w-12 items-center justify-center rounded-full shadow-lg ${realtimeIndicatorClass}`}
-      role="status"
-      aria-live="polite"
-      aria-label={realtimeStatusLabel}
-    >
-      {#if realtimeStatus === 'connected'}
-        <svg
-          class="h-6 w-6 text-white"
-          viewBox="0 0 24 24"
-          aria-hidden="true"
-          focusable="false"
-        >
-          <path
-            d="M5 13.5 9.5 18 19 7"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            fill="none"
-          />
-        </svg>
-      {:else if realtimeStatus === 'connecting'}
-        <svg
-          class="h-6 w-6 animate-spin text-white"
-          viewBox="0 0 24 24"
-          aria-hidden="true"
-          focusable="false"
-        >
-          <circle
-            class="opacity-30"
-            cx="12"
-            cy="12"
-            r="9"
-            stroke="currentColor"
-            stroke-width="2"
-            fill="none"
-          />
-          <path
-            d="M21 12a9 9 0 0 0-9-9"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            fill="none"
-          />
-        </svg>
-      {:else if realtimeStatus === 'error'}
-        <svg class="h-6 w-6 text-white" viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="M12 8v5m0 4h.01M4.5 19h15l-7.5-14-7.5 14Z"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            fill="none"
-          />
-        </svg>
-      {:else}
-        <svg class="h-6 w-6 text-white" viewBox="0 0 24 24" aria-hidden="true">
-          <circle
-            cx="12"
-            cy="12"
-            r="2"
-            fill="currentColor"
-          />
-        </svg>
-      {/if}
+  <!-- Toast -->
+  {#if toast}
+    <div class="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center px-6">
+      <div
+        class="fade-in rounded-md bg-surface-inverse px-4 py-2.5 font-ui text-md text-text-inverse shadow-lg"
+        role="status"
+        aria-live="polite"
+      >
+        {toast}
+      </div>
     </div>
-
-    {#if realtimeError}
-      <p class="pointer-events-auto w-56 text-right text-sm text-editor-error">
-        {realtimeError}
-      </p>
-    {/if}
-  </div>
+  {/if}
 </div>

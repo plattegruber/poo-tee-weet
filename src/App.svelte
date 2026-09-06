@@ -21,17 +21,16 @@
       : '/';
 </script>
 
-<div class="min-h-screen bg-editor-background font-body text-editor-text">
+<div class="min-h-screen bg-surface-page font-ui text-text-body">
   <ClerkProvider publishableKey={publishableKey}>
     <ClerkLoading>
       <main
         class="flex min-h-screen items-center justify-center px-6 py-12"
         aria-busy="true"
-        contenteditable="false"
         lang="en"
-        aria-label="Loading authentication state"
+        aria-label="Loading"
       >
-        <p class="text-lg font-heading leading-heading text-editor-busy">Loading…</p>
+        <p class="font-display text-2xl tracking-tight text-text-faint">poo-tee-weet</p>
       </main>
     </ClerkLoading>
 

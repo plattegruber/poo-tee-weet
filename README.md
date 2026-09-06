@@ -2,7 +2,7 @@
 
 A distraction free writing tool. Live at https://poo-tee-weet.com.
 
-Svelte 5 + Tailwind SPA in `src/`, Clerk for auth, and a Cloudflare Worker in `worker/` with two Durable Objects: `DocumentDO` holds one document, `UserIndexDO` holds one user's document list. Autosave runs over a WebSocket to the document's Durable Object.
+Svelte 5 + Tailwind SPA in `src/` (two screens: the writing page and a pages list), Clerk for auth, and a Cloudflare Worker in `worker/` with two Durable Objects: `DocumentDO` holds one document, `UserIndexDO` holds one user's document list. Autosave runs over a WebSocket to the document's Durable Object.
 
 ## Scripts (pnpm)
 

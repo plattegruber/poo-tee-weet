@@ -2,8 +2,72 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  p + p {
-    @apply mt-4;
+@layer components {
+  /* Empty contenteditable regions show their placeholder in faint ink. */
+  [data-placeholder]:empty::before {
+    content: attr(data-placeholder);
+    color: theme('colors.text.faint');
+    pointer-events: none;
+  }
+
+  /* The writing surface: Literata 20/1.65 on a 38rem measure, italic emphasis. */
+  .prose-surface {
+    @apply font-prose text-prose leading-prose text-text-body;
+  }
+  .prose-surface p + p,
+  .prose-surface p + ul,
+  .prose-surface p + ol,
+  .prose-surface p + blockquote,
+  .prose-surface ul + p,
+  .prose-surface ol + p,
+  .prose-surface blockquote + p {
+    margin-top: 1em;
+  }
+  .prose-surface h2,
+  .prose-surface h3 {
+    @apply font-display font-regular leading-snug tracking-tight;
+    margin: 1.5em 0 0.5em;
+  }
+  .prose-surface h2 {
+    @apply text-xl;
+  }
+  .prose-surface h3 {
+    @apply text-lg;
+  }
+  .prose-surface blockquote {
+    margin: 1em 0;
+    padding-left: 16px;
+    border-left: 1px solid theme('colors.border.strong');
+    color: theme('colors.text.muted');
+    font-style: italic;
+  }
+  .prose-surface ul,
+  .prose-surface ol {
+    margin: 0;
+    padding-left: 1.4em;
+  }
+  .prose-surface li + li {
+    margin-top: 0.25em;
+  }
+  .prose-surface em,
+  .prose-surface i {
+    font-style: italic;
+  }
+  .prose-surface strong,
+  .prose-surface b {
+    font-weight: 600;
+  }
+
+  /* Fade-only motion: menus, toasts and dialogs. */
+  .fade-in {
+    animation: fade-in theme('transitionDuration.base') theme('transitionTimingFunction.out') both;
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 }
