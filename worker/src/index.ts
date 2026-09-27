@@ -5,8 +5,16 @@
  */
 
 import { verifyToken } from '@clerk/backend';
+import {
+  hasPlatteDevTag,
+  initialPlatteDevState,
+  isPlatteDevEnabled,
+  reconcilePlatteDev,
+  type PlatteDevEnv,
+  type PlatteDevState,
+} from './plugins/platteDev';
 
-interface Env {
+interface Env extends PlatteDevEnv {
   CLERK_SECRET_KEY: string;
   ALLOWED_ORIGINS?: string;
   DocumentDO: DurableObjectNamespace;
@@ -84,6 +92,13 @@ const JSON_HEADERS = {
 
 const MAX_CONTENT_LENGTH = 1_000_000;
 const TOO_LARGE_MESSAGE = 'Document too large (limit 1 MB)';
+
+// Plugins run from the Durable Object alarm once typing has gone quiet, so a
+// burst of keystrokes turns into one sync. Each platte.dev sync is a commit
+// that redeploys the blog, so the idle window is generous.
+const PLUGIN_SYNC_IDLE_MS = 30_000;
+const PLUGIN_SYNC_ON_CLOSE_MS = 2_000;
+const PLATTE_DEV_STATE_KEY = 'plugin:platte.dev';
 
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -583,11 +598,20 @@ export class DocumentDO {
       return json(403, { error: 'Forbidden' });
     }
 
+    // Pull a GitHub edit in before the editor sees the document, so the user
+    // never types over it. A GitHub outage must not block opening a document.
+    let snapshot = record;
+    try {
+      snapshot = (await this.runPlatteDevSync(record)) ?? record;
+    } catch (error) {
+      console.error('platte.dev: pull on open failed', error);
+    }
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.state.acceptWebSocket(server);
     server.serializeAttachment({ userId });
-    server.send(JSON.stringify({ type: 'snapshot', document: record }));
+    server.send(JSON.stringify({ type: 'snapshot', document: snapshot }));
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -630,7 +654,15 @@ export class DocumentDO {
     const record = await this.ensureDocumentLoaded();
     if (record) {
       await this.syncIndex(record);
+      await this.schedulePluginSync(record, PLUGIN_SYNC_ON_CLOSE_MS);
     }
+  }
+
+  /** Fires after the idle window; runs whichever plugins the document's tags enable. */
+  async alarm(): Promise<void> {
+    const record = await this.ensureDocumentLoaded();
+    if (!record) return;
+    await this.runPlatteDevSync(record);
   }
 
   async webSocketError(_ws: WebSocket, error: Error): Promise<void> {
@@ -676,6 +708,7 @@ export class DocumentDO {
     if (metadataChanged) {
       await this.syncIndex(nextRecord);
     }
+    await this.schedulePluginSync(nextRecord);
 
     ws.send(
       JSON.stringify({
@@ -730,6 +763,7 @@ export class DocumentDO {
       }
       await this.state.storage.put('document', record);
       this.document = record;
+      await this.schedulePluginSync(record);
 
       return json(201, { document: record });
     }
@@ -753,6 +787,7 @@ export class DocumentDO {
     }
     await this.state.storage.put('document', updated);
     this.document = updated;
+    await this.schedulePluginSync(updated);
 
     return json(200, { document: updated });
   }
@@ -775,6 +810,7 @@ export class DocumentDO {
       }
     }
 
+    await this.state.storage.deleteAlarm();
     await this.state.storage.deleteAll();
     this.document = null;
     return new Response(null, { status: 204 });
@@ -798,7 +834,11 @@ export class DocumentDO {
       .filter((socket) => socket !== except && socket.readyState === WebSocket.OPEN);
   }
 
-  private broadcastToOthers(origin: WebSocket, payload: JsonValue): void {
+  private broadcast(payload: JsonValue): void {
+    this.broadcastToOthers(undefined, payload);
+  }
+
+  private broadcastToOthers(origin: WebSocket | undefined, payload: JsonValue): void {
     const encoded = JSON.stringify(payload);
     for (const socket of this.openSockets(origin)) {
       try {
@@ -806,6 +846,70 @@ export class DocumentDO {
       } catch (error) {
         console.error('Failed to fan-out realtime update', error);
       }
+    }
+  }
+
+  private platteDevApplies(record: DocumentRecord): boolean {
+    return hasPlatteDevTag(record.tags) && isPlatteDevEnabled(this.env, record.ownerId);
+  }
+
+  /**
+   * Debounced: every write pushes the alarm out again. Untagged documents never
+   * set one, and a stale alarm re-checks the tags before doing anything.
+   */
+  private async schedulePluginSync(
+    record: DocumentRecord,
+    delayMs = PLUGIN_SYNC_IDLE_MS
+  ): Promise<void> {
+    if (!this.platteDevApplies(record)) return;
+    await this.state.storage.setAlarm(Date.now() + delayMs);
+  }
+
+  /**
+   * Reconciles the document with its post in either direction. Returns the
+   * record as it stands afterwards, which differs from the input after a pull.
+   */
+  private async runPlatteDevSync(record: DocumentRecord): Promise<DocumentRecord | null> {
+    if (!this.platteDevApplies(record)) return null;
+
+    const state =
+      (await this.state.storage.get<PlatteDevState>(PLATTE_DEV_STATE_KEY)) ??
+      initialPlatteDevState(record);
+
+    try {
+      const outcome = await reconcilePlatteDev(this.env, record, state);
+      if (outcome.kind !== 'pull') {
+        await this.state.storage.put(PLATTE_DEV_STATE_KEY, outcome.state);
+        if (outcome.kind === 'pushed') {
+          console.log(`platte.dev: pushed "${record.title}" as ${outcome.state.slug}`);
+        }
+        return record;
+      }
+
+      const pulled: DocumentRecord = {
+        ...record,
+        title: outcome.document.title,
+        content: outcome.document.content,
+        tags: ensureDocumentTags(outcome.document.tags),
+        updatedAt: new Date().toISOString(),
+        version: record.version + 1,
+      };
+      this.document = pulled;
+      await this.state.storage.put('document', pulled);
+      await this.state.storage.put(PLATTE_DEV_STATE_KEY, {
+        ...outcome.state,
+        syncedVersion: pulled.version,
+      });
+      await this.syncIndex(pulled);
+      this.broadcast({ type: 'remote-update', document: pulled });
+      console.log(`platte.dev: pulled ${outcome.state.slug} into "${pulled.title}"`);
+      return pulled;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.state.storage.put(PLATTE_DEV_STATE_KEY, { ...state, lastError: message });
+      console.error(`platte.dev: sync failed for ${record.docId}: ${message}`);
+      // Rethrow so the runtime retries the alarm with backoff.
+      throw error;
     }
   }
 
