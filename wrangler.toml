@@ -12,9 +12,9 @@ ALLOWED_ORIGINS = "https://poo-tee-weet.com,https://www.poo-tee-weet.com"
 # GITHUB_TOKEN is a secret (wrangler secret put GITHUB_TOKEN). Set
 # PLATTE_DEV_OWNER_ID to the Clerk user id allowed to publish.
 PLATTE_DEV_OWNER_ID = "user_355k1Q9HVxcBkZG611OHVKTRsSS"
-PLATTE_DEV_REPO = "plattegruber/platte-dot-dev"
+PLATTE_DEV_REPO = "plattegruber/plattedotdev"
 PLATTE_DEV_BRANCH = "main"
-PLATTE_DEV_POSTS_DIR = "src/posts"
+PLATTE_DEV_POSTS_DIR = "src/content/posts"
 
 [[durable_objects.bindings]]
 name = "DocumentDO"

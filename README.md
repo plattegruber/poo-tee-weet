@@ -46,14 +46,15 @@ Plugins are enabled per document by tag. There is one so far.
 
 ### platte.dev
 
-Add the tag `platte.dev` to a document and it becomes a post at `src/posts/<slug>.md` in the [platte-dot-dev](https://github.com/plattegruber/platte-dot-dev) repo. The document and the post are the same thing seen from two places: edit either side and the other catches up. Pushing to `main` there deploys the blog.
+Add the tag `platte.dev` to a document and it becomes a post at `src/content/posts/<slug>.md` in the [plattedotdev](https://github.com/plattegruber/plattedotdev) repo. The document and the post are the same thing seen from two places: edit either side and the other catches up. A GitHub Action there deploys the blog on every push to `main`.
 
 - **Push.** The Worker waits until typing has been idle for 30 seconds (or the last editor tab closes), converts the document to markdown with frontmatter, and commits it through the GitHub Contents API.
 - **Pull.** Opening a document checks the file on GitHub. If it changed and the document did not, the post is converted back to editor HTML and loaded in.
 - **Conflicts.** If both sides changed before they caught up, poo-tee-weet wins. The GitHub version stays in git history.
 - **Adopt.** An empty document whose title matches an existing post takes that post over. A document with text takes a fresh slug (`title-2`) so nothing is overwritten.
 - The slug is fixed on first publish, so renaming a document later updates the post title but keeps the URL.
-- `date` is the first publish date and sticks if edited on GitHub. `description` is always the first paragraph.
+- The frontmatter follows the site schema: `blurb` is the first paragraph, `readMin` is computed, `tag` is the document's first other tag (default `‡ essay`), and `date` is the first publish date. `date` and `featured` stick if edited on GitHub.
+- Hand-written `.mdx` posts are never touched. A document whose slug matches one gets a fresh slug.
 - Removing the tag or deleting the document stops syncing. It does not delete the post. A file deleted on GitHub while the tag is on is put back.
 - Only the configured `PLATTE_DEV_OWNER_ID` can publish, so other accounts tagging `platte.dev` are ignored.
 

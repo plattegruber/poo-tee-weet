@@ -1,8 +1,9 @@
 /**
  * platte.dev plugin.
  *
- * A document tagged "platte.dev" and a markdown post in the platte-dot-dev
- * GitHub repo (src/posts/<slug>.md) are the same thing seen from two places.
+ * A document tagged "platte.dev" and a markdown post in the plattedotdev
+ * GitHub repo (src/content/posts/<slug>.md) are the same thing seen from two
+ * places. Hand-written .mdx posts are never touched: the plugin only owns .md.
  * Edits on either side flow to the other. If both moved before they caught up,
  * poo-tee-weet wins and git keeps the version it replaced. Removing the tag
  * stops syncing but leaves the post in place.
@@ -29,6 +30,8 @@ export interface PlatteDevDocument {
 export interface PlatteDevState {
   slug: string;
   publishedAt: string;
+  /** Frontmatter lines the plugin does not own (featured, ...), kept verbatim across pushes. */
+  extra?: string[];
   sha: string | null;
   contentHash: string | null;
   syncedVersion: number;
@@ -307,20 +310,33 @@ export const slugify = (title: string, fallback: string): string => {
   return slug || `post-${fallback.slice(0, 8)}`;
 };
 
-export const buildPostMarkdown = (document: PlatteDevDocument, publishedAt: string): string => {
-  const tags = document.tags.filter((tag) => tag.toLowerCase() !== PLATTE_DEV_TAG);
+const WORDS_PER_MINUTE = 200;
+const DEFAULT_TAG = '‡ essay';
+
+/** Frontmatter keys the plugin writes itself; anything else is carried over untouched. */
+const OWNED_KEYS = new Set(['title', 'blurb', 'description', 'date', 'readMin', 'tag', 'tags']);
+
+const readMinutes = (content: string): number => {
+  const words = plainText(bodyNodes(content)).split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.round(words / WORDS_PER_MINUTE));
+};
+
+export const buildPostMarkdown = (document: PlatteDevDocument, state: PlatteDevState): string => {
+  const tag = document.tags.find((item) => item.toLowerCase() !== PLATTE_DEV_TAG) ?? DEFAULT_TAG;
   const frontmatter = [
     '---',
     `title: ${JSON.stringify(document.title)}`,
-    `date: ${JSON.stringify(publishedAt)}`,
-    `description: ${JSON.stringify(buildDescription(document.content))}`,
-    `tags: ${JSON.stringify(tags)}`,
+    `blurb: ${JSON.stringify(buildDescription(document.content))}`,
+    `date: ${state.publishedAt}`,
+    `readMin: ${readMinutes(document.content)}`,
+    `tag: ${JSON.stringify(tag)}`,
+    ...(state.extra ?? []),
     '---',
   ].join('\n');
 
+  // The page renders the title itself, so the body carries no heading.
   const body = renderBlocks(bodyNodes(document.content)).join('\n\n');
-  const heading = `# ${renderInline([{ type: 'text', text: document.title }]).trim()}`;
-  return `${frontmatter}\n\n${heading}\n\n${body}\n`.replace(/\n{3,}/g, '\n\n');
+  return `${frontmatter}\n\n${body}\n`.replace(/\n{3,}/g, '\n\n');
 };
 
 // ---------------------------------------------------------------------------
@@ -360,9 +376,9 @@ const githubRequest = async (
   });
 
 const repoConfig = (env: PlatteDevEnv) => ({
-  repo: env.PLATTE_DEV_REPO ?? 'plattegruber/platte-dot-dev',
+  repo: env.PLATTE_DEV_REPO ?? 'plattegruber/plattedotdev',
   branch: env.PLATTE_DEV_BRANCH ?? 'main',
-  postsDir: (env.PLATTE_DEV_POSTS_DIR ?? 'src/posts').replace(/^\/+|\/+$/g, ''),
+  postsDir: (env.PLATTE_DEV_POSTS_DIR ?? 'src/content/posts').replace(/^\/+|\/+$/g, ''),
 });
 
 interface RemoteFile {
@@ -573,6 +589,8 @@ export interface ParsedPost {
   title: string | null;
   date: string | null;
   tags: string[];
+  /** Frontmatter lines the plugin does not own, verbatim. */
+  extra: string[];
   body: string;
 }
 
@@ -596,19 +614,25 @@ const parseYamlValue = (raw: string): unknown => {
 export const parsePost = (markdown: string): ParsedPost => {
   const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   const fields: Record<string, unknown> = {};
+  const extra: string[] = [];
   if (match) {
     for (const line of match[1].split(/\r?\n/)) {
       const pair = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
-      if (pair) fields[pair[1]] = parseYamlValue(pair[2]);
+      if (!pair) continue;
+      fields[pair[1]] = parseYamlValue(pair[2]);
+      if (!OWNED_KEYS.has(pair[1])) extra.push(line);
     }
   }
   const tags = Array.isArray(fields.tags)
     ? fields.tags.filter((tag): tag is string => typeof tag === 'string')
-    : [];
+    : typeof fields.tag === 'string' && fields.tag
+      ? [fields.tag]
+      : [];
   return {
     title: typeof fields.title === 'string' ? fields.title : null,
     date: typeof fields.date === 'string' ? fields.date : null,
     tags,
+    extra,
     body: match ? markdown.slice(match[0].length) : markdown,
   };
 };
@@ -657,11 +681,17 @@ const hasBody = (document: PlatteDevDocument): boolean =>
   renderBlocks(bodyNodes(document.content)).length > 0;
 
 /** Finds an unused slug so a new document never overwrites an existing post. */
+const slugTaken = async (env: PlatteDevEnv, slug: string): Promise<boolean> => {
+  const { postsDir } = repoConfig(env);
+  return Boolean(await fetchFile(env, `${postsDir}/${slug}.mdx`));
+};
+
 const freshSlug = async (env: PlatteDevEnv, base: string): Promise<string> => {
   const { postsDir } = repoConfig(env);
   for (let attempt = 2; attempt < 50; attempt += 1) {
     const candidate = `${base}-${attempt}`;
-    if (!(await fetchFile(env, `${postsDir}/${candidate}.md`))) return candidate;
+    const md = await fetchFile(env, `${postsDir}/${candidate}.md`);
+    if (!md && !(await slugTaken(env, candidate))) return candidate;
   }
   return `${base}-${crypto.randomUUID().slice(0, 8)}`;
 };
@@ -674,7 +704,7 @@ const push = async (
 ): Promise<PlatteDevOutcome> => {
   const { postsDir } = repoConfig(env);
   const path = `${postsDir}/${state.slug}.md`;
-  const markdown = buildPostMarkdown(document, state.publishedAt);
+  const markdown = buildPostMarkdown(document, state);
   const contentHash = await sha256(markdown);
   const now = new Date().toISOString();
 
@@ -725,6 +755,7 @@ const pull = async (
     state: {
       ...state,
       publishedAt: post.date ?? state.publishedAt,
+      extra: post.extra,
       sha: remote.sha,
       contentHash: await sha256(remote.markdown),
       // The caller sets syncedVersion to the version it writes.
@@ -737,8 +768,9 @@ const pull = async (
 /**
  * Decides which way the post flows and does it.
  *
- * - Never synced: an existing file at the slug is adopted into an empty
- *   document; a document with text takes a fresh slug so nothing is clobbered.
+ * - Never synced: an existing .md at the slug is adopted into an empty
+ *   document; a document with text, or a hand-written .mdx at the slug,
+ *   means a fresh slug so nothing is clobbered.
  * - GitHub moved and the document did not: pull.
  * - The document moved (or both did): push. poo-tee-weet wins; git has history.
  * - A file deleted on GitHub while the tag is on is put back.
@@ -756,7 +788,7 @@ export const reconcilePlatteDev = async (
     if (existing && !hasBody(document)) {
       return pull(document, state, existing);
     }
-    if (existing) {
+    if (existing || (await slugTaken(env, state.slug))) {
       const slug = await freshSlug(env, state.slug);
       return push(env, document, { ...state, slug }, null);
     }

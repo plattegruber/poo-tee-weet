@@ -7,7 +7,7 @@
 - `src/components/Icon.svelte` – the few Lucide glyphs the interface uses, inlined.
 - `src/components/SignedOutView.svelte` – Clerk sign-in/sign-up.
 - `worker/src/index.ts` – Worker router plus `UserIndexDO` and `DocumentDO`.
-- `worker/src/plugins/platteDev.ts` – the platte.dev plugin: HTML to markdown, post frontmatter, GitHub commit. `DocumentDO` schedules it from an alarm when a document carries the `platte.dev` tag.
+- `worker/src/plugins/platteDev.ts` – the platte.dev plugin: HTML to markdown and back, Astro post frontmatter, GitHub reconcile. `DocumentDO` schedules it from an alarm when a document carries the `platte.dev` tag.
 - `wrangler.toml` – Worker config; production `ALLOWED_ORIGINS` is set here.
 - Static assets live in `public/`. `dist/` is build output and never committed.
 
